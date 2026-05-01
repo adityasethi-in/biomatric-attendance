@@ -128,6 +128,15 @@ export async function loginAdmin({ organizationSlug, username, password }) {
   return parseResponse(r, "Login failed");
 }
 
+export async function warmupScanner() {
+  const r = await fetch(`${API_BASE}/scanner/warmup`, {
+    method: "POST",
+    headers: scannerHeaders(),
+  });
+
+  return parseResponse(r, "Scanner is not ready");
+}
+
 export async function registerOrganization(data) {
   const form = new FormData();
   Object.entries(data).forEach(([key, value]) => form.append(key, value));

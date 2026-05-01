@@ -51,3 +51,6 @@ class FaceEngine:
             return False
         contrast = float(center.std())
         return contrast > 8.0
+
+    def close(self):
+        self.mp_face_mesh.close()

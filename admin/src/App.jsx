@@ -24,6 +24,7 @@ import {
   setActiveOrgSlug,
   setAdminSession,
   setScannerSession,
+  warmupScanner,
 } from "./api";
 
 const ENROLLMENT_POSES = [
@@ -301,6 +302,12 @@ export default function App() {
         setMessage("Scanner login expired. Please login again.");
         return;
       }
+      if (err.status === 503) {
+        closeCamera();
+        setScannerStatus(err.message);
+        setMessage(err.message);
+        return;
+      }
       setScannerStatus(err.message);
       setFlashState("error");
       setTimeout(() => setFlashState(null), 1100);
@@ -544,9 +551,18 @@ export default function App() {
         password: scannerPassword,
       });
       setScannerSession(result);
-      setScannerAuthenticated(true);
       setScannerOrgName(result.organization.name);
       setScannerPassword("");
+      setScannerStatus("Preparing scanner...");
+      try {
+        await warmupScanner();
+      } catch (warmupError) {
+        clearScannerSession();
+        setScannerAuthenticated(false);
+        setMessage(warmupError.message);
+        return;
+      }
+      setScannerAuthenticated(true);
       setScannerStatus("Login successful. Starting camera...");
     } catch (err) {
       setMessage(err.message);

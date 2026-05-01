@@ -1,11 +1,14 @@
 import asyncio
+import gc
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+import time
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, time as dt_time, timezone
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import math
 
@@ -58,6 +61,8 @@ CLIENT_FACE_SCAN_CANDIDATES = int(os.getenv("CLIENT_FACE_SCAN_CANDIDATES", "20")
 CLIENT_FACE_MULTI_MATCH_MIN_HITS = int(os.getenv("CLIENT_FACE_MULTI_MATCH_MIN_HITS", "2"))
 CLIENT_FACE_MATCH_MARGIN = float(os.getenv("CLIENT_FACE_MATCH_MARGIN", "0.035"))
 FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "server").lower()
+FACE_ENGINE_ACTIVE_WINDOWS = os.getenv("FACE_ENGINE_ACTIVE_WINDOWS", "").strip()
+FACE_ENGINE_IDLE_UNLOAD_SECONDS = int(os.getenv("FACE_ENGINE_IDLE_UNLOAD_SECONDS", "300"))
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 VALID_PERSON_TYPES = {"student", "staff", "teacher"}
@@ -177,22 +182,107 @@ def rate_limit_key(request: Request) -> str:
 
 limiter = Limiter(key_func=rate_limit_key, default_limits=["120/minute"])
 _face_engine = None
+_face_engine_last_used_at = 0.0
+
+
+def _app_zone():
+    try:
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        return ZoneInfo("Asia/Kolkata")
+
+
+def _parse_hhmm(value: str) -> dt_time | None:
+    try:
+        hour, minute = value.strip().split(":", 1)
+        return dt_time(hour=int(hour), minute=int(minute))
+    except Exception:
+        return None
+
+
+def _face_engine_windows() -> list[tuple[dt_time, dt_time]]:
+    if not FACE_ENGINE_ACTIVE_WINDOWS:
+        return []
+    windows = []
+    for raw_window in re.split(r"[,;]", FACE_ENGINE_ACTIVE_WINDOWS):
+        if "-" not in raw_window:
+            continue
+        start_raw, end_raw = raw_window.split("-", 1)
+        start = _parse_hhmm(start_raw)
+        end = _parse_hhmm(end_raw)
+        if start and end:
+            windows.append((start, end))
+    return windows
+
+
+def _time_in_window(current: dt_time, start: dt_time, end: dt_time) -> bool:
+    if start <= end:
+        return start <= current <= end
+    return current >= start or current <= end
+
+
+def face_engine_allowed_now() -> bool:
+    windows = _face_engine_windows()
+    if not windows:
+        return True
+    current = datetime.now(_app_zone()).time()
+    return any(_time_in_window(current, start, end) for start, end in windows)
+
+
+def face_engine_schedule_label() -> str:
+    windows = _face_engine_windows()
+    if not windows:
+        return "all day"
+    return ", ".join(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in windows)
+
+
+def unload_face_engine(reason: str = "idle"):
+    global _face_engine, _face_engine_last_used_at
+    if _face_engine is None:
+        return
+    close = getattr(_face_engine, "close", None)
+    if callable(close):
+        close()
+    _face_engine = None
+    _face_engine_last_used_at = 0.0
+    gc.collect()
+    LOGGER.info("Face scanner released (%s)", reason)
 
 
 def get_face_engine():
     """Start the scanner engine only for the image upload flow."""
+    global _face_engine, _face_engine_last_used_at
     if FACE_ENGINE_MODE in {"client", "off", "disabled", "false", "0"}:
         raise HTTPException(
             status_code=503,
             detail="Face scanner is not ready. Please refresh and try again.",
         )
+    if not face_engine_allowed_now():
+        unload_face_engine("outside-window")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Scanner is available during attendance time ({face_engine_schedule_label()}).",
+        )
 
-    global _face_engine
     if _face_engine is None:
         from .face_engine import FaceEngine
 
         _face_engine = FaceEngine()
+        LOGGER.info("Face scanner loaded")
+    _face_engine_last_used_at = time.monotonic()
     return _face_engine
+
+
+async def face_engine_reaper():
+    while True:
+        await asyncio.sleep(30)
+        if _face_engine is None:
+            continue
+        idle_for = time.monotonic() - _face_engine_last_used_at
+        if not face_engine_allowed_now():
+            unload_face_engine("outside-window")
+        elif FACE_ENGINE_IDLE_UNLOAD_SECONDS > 0 and idle_for >= FACE_ENGINE_IDLE_UNLOAD_SECONDS:
+            unload_face_engine("idle")
 
 
 @asynccontextmanager
@@ -279,6 +369,7 @@ async def lifespan(app: FastAPI):
 
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(outbox_worker(SessionLocal, stop_event))
+    face_reaper_task = asyncio.create_task(face_engine_reaper())
     try:
         yield
     finally:
@@ -287,6 +378,10 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(worker_task, timeout=5.0)
         except asyncio.TimeoutError:
             worker_task.cancel()
+        face_reaper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await face_reaper_task
+        unload_face_engine("shutdown")
 
 
 from slowapi import _rate_limit_exceeded_handler
@@ -455,6 +550,13 @@ async def health():
 @app.get("/")
 async def root():
     return {"service": "Face Recognition Attendance API", "health": "/health"}
+
+
+@app.post("/scanner/warmup")
+@limiter.limit("20/minute")
+async def warmup_scanner(request: Request, _operator: dict = Depends(require_operator)):
+    get_face_engine()
+    return {"ok": True, "scanner": "ready", "schedule": face_engine_schedule_label()}
 
 
 @app.get("/organizations")

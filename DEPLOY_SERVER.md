@@ -214,6 +214,8 @@ For older deployments that still need to migrate sample data, first keep:
 
 ```env
 FACE_ENGINE_MODE=server
+FACE_ENGINE_ACTIVE_WINDOWS=07:30-09:30
+FACE_ENGINE_IDLE_UNLOAD_SECONDS=300
 ```
 
 After profiles have fresh camera samples, switch to:
