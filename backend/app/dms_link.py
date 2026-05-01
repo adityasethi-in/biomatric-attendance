@@ -204,7 +204,7 @@ async def _drain_once(SessionLocal: async_sessionmaker[AsyncSession], batch: int
                         UPDATE dms_outbox
                         SET attempt_count = attempt_count + 1,
                             last_error = :err,
-                            next_attempt_at = now() + (:delta || ' seconds')::interval
+                            next_attempt_at = now() + (CAST(:delta AS integer) * interval '1 second')
                         WHERE id = :id
                         """
                     ),
