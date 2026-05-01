@@ -294,6 +294,13 @@ export default function App() {
         setTimeout(() => setFlashState(null), 900);
       }
     } catch (err) {
+      if (err.status === 401) {
+        clearScannerSession();
+        setScannerAuthenticated(false);
+        closeCamera();
+        setMessage("Scanner login expired. Please login again.");
+        return;
+      }
       setScannerStatus(err.message);
       setFlashState("error");
       setTimeout(() => setFlashState(null), 1100);
