@@ -66,8 +66,8 @@ export async function getClientFaceDescriptor(input) {
   const faceapi = await getFaceApi();
   const media = input instanceof Blob ? await blobToImage(input) : input;
   const options = new faceapi.TinyFaceDetectorOptions({
-    inputSize: 224,
-    scoreThreshold: 0.45,
+    inputSize: 320,
+    scoreThreshold: 0.35,
   });
   const result = await faceapi
     .detectSingleFace(media, options)

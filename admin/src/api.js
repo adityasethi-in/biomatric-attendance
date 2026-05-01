@@ -313,7 +313,7 @@ export async function markAttendanceFromFile(file) {
   return parseResponse(r, "Attendance failed");
 }
 
-export async function markAttendanceWithEmbedding({ embedding, qualityScore, model }) {
+export async function markAttendanceWithEmbedding({ embedding, embeddings, qualityScore, qualityScores, model }) {
   const r = await fetch(`${API_BASE}/attendance/mark-client`, {
     method: "POST",
     headers: {
@@ -322,7 +322,9 @@ export async function markAttendanceWithEmbedding({ embedding, qualityScore, mod
     },
     body: JSON.stringify({
       embedding,
+      embeddings,
       quality_score: qualityScore,
+      quality_scores: qualityScores,
       model_name: model?.name,
       model_version: model?.version,
     }),

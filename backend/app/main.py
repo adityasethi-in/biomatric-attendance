@@ -47,13 +47,16 @@ def _csv_env(name: str) -> list[str]:
 
 THRESH = float(os.getenv("FACE_MATCH_THRESHOLD", "0.60"))
 DUPLICATE_THRESH = float(os.getenv("FACE_DUPLICATE_THRESHOLD", os.getenv("FACE_MATCH_THRESHOLD", "0.60")))
-CLIENT_FACE_MATCH_THRESHOLD = float(os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.58"))
+CLIENT_FACE_MATCH_THRESHOLD = float(os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.60"))
 CLIENT_FACE_DUPLICATE_THRESHOLD = float(
-    os.getenv("CLIENT_FACE_DUPLICATE_THRESHOLD", os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.58"))
+    os.getenv("CLIENT_FACE_DUPLICATE_THRESHOLD", os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.60"))
 )
 CLIENT_FACE_EMBEDDING_DIM = int(os.getenv("CLIENT_FACE_EMBEDDING_DIM", "128"))
 CLIENT_FACE_MODEL_NAME = os.getenv("CLIENT_FACE_MODEL_NAME", "face-api-128").strip() or "face-api-128"
 CLIENT_FACE_MODEL_VERSION = os.getenv("CLIENT_FACE_MODEL_VERSION", "vladmandic-face-api-1.7.15").strip()
+CLIENT_FACE_SCAN_CANDIDATES = int(os.getenv("CLIENT_FACE_SCAN_CANDIDATES", "20"))
+CLIENT_FACE_MULTI_MATCH_MIN_HITS = int(os.getenv("CLIENT_FACE_MULTI_MATCH_MIN_HITS", "2"))
+CLIENT_FACE_MATCH_MARGIN = float(os.getenv("CLIENT_FACE_MATCH_MARGIN", "0.035"))
 FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "server").lower()
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
@@ -695,6 +698,14 @@ def client_confidence(distance: float, threshold: float = CLIENT_FACE_MATCH_THRE
     return max(0, min(100, round((1.0 - (distance / threshold)) * 100)))
 
 
+def median_distance(values: list[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
 def should_check_liveness() -> bool:
     return LIVENESS_MODE in {"basic", "strict"}
 
@@ -1310,38 +1321,100 @@ async def mark_attendance_client(
     db: AsyncSession = Depends(get_tenant_db),
     operator: dict = Depends(require_operator),
 ):
-    embedding = validate_client_embedding(payload.get("embedding"))
+    raw_embeddings = payload.get("embeddings")
+    if raw_embeddings is not None:
+        embeddings = validate_client_embeddings(raw_embeddings, min_count=1, max_count=5)
+    else:
+        embeddings = [validate_client_embedding(payload.get("embedding"))]
     model_name = str(payload.get("model_name") or CLIENT_FACE_MODEL_NAME)
     model_version = str(payload.get("model_version") or CLIENT_FACE_MODEL_VERSION)
 
-    result = await db.execute(
-        text(
-            """
-            SELECT cfe.student_id, s.full_name, s.person_type,
-                   s.dms_person_kind, s.dms_person_id, s.student_code,
-                   (cfe.embedding <-> CAST(:emb AS vector)) AS distance
-            FROM client_face_embeddings cfe
-            JOIN students s ON s.id = cfe.student_id
-            WHERE cfe.model_name = :model_name
-              AND cfe.model_version = :model_version
-            ORDER BY cfe.embedding <-> CAST(:emb AS vector)
-            LIMIT 1
-            """
-        ),
-        {
-            "emb": to_vector_literal(embedding),
-            "model_name": model_name,
-            "model_version": model_version,
-        },
+    candidate_limit = max(5, min(CLIENT_FACE_SCAN_CANDIDATES, 50))
+    required_hits = 1 if len(embeddings) == 1 else min(
+        max(CLIENT_FACE_MULTI_MATCH_MIN_HITS, 2),
+        len(embeddings),
     )
-    row = result.mappings().first()
+    candidates = {}
+    nearest_distance = None
 
-    if not row or float(row["distance"]) > CLIENT_FACE_MATCH_THRESHOLD:
+    for embedding in embeddings:
+        result = await db.execute(
+            text(
+                """
+                SELECT cfe.student_id, s.full_name, s.person_type,
+                       s.dms_person_kind, s.dms_person_id, s.student_code,
+                       (cfe.embedding <-> CAST(:emb AS vector)) AS distance
+                FROM client_face_embeddings cfe
+                JOIN students s ON s.id = cfe.student_id
+                WHERE cfe.model_name = :model_name
+                  AND cfe.model_version = :model_version
+                ORDER BY cfe.embedding <-> CAST(:emb AS vector)
+                LIMIT :candidate_limit
+                """
+            ),
+            {
+                "emb": to_vector_literal(embedding),
+                "model_name": model_name,
+                "model_version": model_version,
+                "candidate_limit": candidate_limit,
+            },
+        )
+        frame_best = {}
+        for row in result.mappings().all():
+            distance = float(row["distance"])
+            nearest_distance = distance if nearest_distance is None else min(nearest_distance, distance)
+            existing = frame_best.get(row["student_id"])
+            if existing is None or distance < existing["distance"]:
+                frame_best[row["student_id"]] = {**dict(row), "distance": distance}
+
+        for row in frame_best.values():
+            student_id = row["student_id"]
+            distance = row["distance"]
+            candidate = candidates.setdefault(
+                student_id,
+                {
+                    "student_id": student_id,
+                    "full_name": row["full_name"],
+                    "person_type": row["person_type"],
+                    "dms_person_kind": row["dms_person_kind"],
+                    "dms_person_id": row["dms_person_id"],
+                    "student_code": row["student_code"],
+                    "distances": [],
+                    "hit_distances": [],
+                },
+            )
+            candidate["distances"].append(distance)
+            if distance <= CLIENT_FACE_MATCH_THRESHOLD:
+                candidate["hit_distances"].append(distance)
+
+    eligible = []
+    for candidate in candidates.values():
+        hits = len(candidate["hit_distances"])
+        if hits < required_hits:
+            continue
+        score = median_distance(candidate["hit_distances"])
+        eligible.append(
+            {
+                **candidate,
+                "distance": score,
+                "hits": hits,
+            }
+        )
+
+    eligible.sort(key=lambda item: (item["distance"], -item["hits"]))
+    row = eligible[0] if eligible else None
+
+    if row and len(eligible) > 1:
+        second = eligible[1]
+        if second["distance"] - row["distance"] < CLIENT_FACE_MATCH_MARGIN:
+            row = None
+
+    if not row:
         return {
             "matched": False,
             "reason": "unknown_face",
-            "distance": None if not row else float(row["distance"]),
-            "confidence": 0 if not row else client_confidence(float(row["distance"])),
+            "distance": nearest_distance,
+            "confidence": 0 if nearest_distance is None else client_confidence(nearest_distance),
         }
 
     distance = float(row["distance"])

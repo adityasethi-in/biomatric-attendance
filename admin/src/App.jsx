@@ -19,7 +19,6 @@ import {
   getStudents,
   getSummary,
   loginAdmin,
-  markAttendanceFromFile,
   markAttendanceWithEmbedding,
   registerOrganization,
   registerStudentClientSamples,
@@ -42,6 +41,11 @@ const ENROLLMENT_POSES = [
   "Lift your chin slightly",
   "Lower your chin slightly",
 ];
+
+const SCAN_FRAME_COUNT = 3;
+const SCAN_FRAME_DELAY_MS = 100;
+const SCAN_COOLDOWN_MS = 100;
+const SCAN_SUCCESS_PAUSE_MS = 1800;
 
 const DEFAULT_ORG_SLUG = "delight-model-school";
 const emptyOrgRegistration = {
@@ -115,8 +119,12 @@ export default function App() {
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const scanInFlightRef = useRef(false);
-  const lastScanAtRef = useRef(0);
+  const nextScanAllowedAtRef = useRef(0);
   const clientMlFailedRef = useRef(false);
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
 
   async function loadAll() {
     const [s, r, summaryData, statusData] = await Promise.all([
@@ -282,48 +290,63 @@ export default function App() {
     return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
   }
 
+  async function captureScanPackage() {
+    const blobs = [];
+    const descriptors = [];
+
+    for (let index = 0; index < SCAN_FRAME_COUNT; index += 1) {
+      const blob = await captureCurrentFrame();
+      if (blob) {
+        blobs.push(blob);
+        if (clientMlStatus !== "fallback" && !clientMlFailedRef.current) {
+          try {
+            const descriptor = await getClientFaceDescriptor(blob);
+            descriptors.push(descriptor);
+          } catch {
+            // Ignore one unclear frame; the next two frames may still be good.
+          }
+        }
+      }
+
+      if (index < SCAN_FRAME_COUNT - 1) {
+        await sleep(SCAN_FRAME_DELAY_MS);
+      }
+    }
+
+    return { blobs, descriptors };
+  }
+
   async function scanAttendanceFrame() {
     const now = Date.now();
-    if (scanInFlightRef.current || now - lastScanAtRef.current < 1400) return;
+    if (scanInFlightRef.current || now < nextScanAllowedAtRef.current) return;
     scanInFlightRef.current = true;
-    lastScanAtRef.current = now;
     setCameraLoading(true);
     setScannerStatus("Scanning...");
+    let nextPauseMs = SCAN_COOLDOWN_MS;
 
     try {
-      const blob = await captureCurrentFrame();
+      const { blobs, descriptors } = await captureScanPackage();
+      const blob = blobs[0];
       if (!blob) return;
       let result;
       try {
-        if (clientMlStatus !== "fallback" && !clientMlFailedRef.current) {
-          setScannerStatus(clientMlStatus === "ready" ? "Scanning..." : "Preparing scanner...");
-          const descriptor = await getClientFaceDescriptor(blob);
+        if (descriptors.length >= 2) {
+          setScannerStatus("Matching...");
           result = await markAttendanceWithEmbedding({
-            embedding: descriptor.embedding,
-            qualityScore: descriptor.qualityScore,
+            embeddings: descriptors.map((descriptor) => descriptor.embedding),
+            qualityScores: descriptors.map((descriptor) => descriptor.qualityScore),
             model: CLIENT_FACE_MODEL,
           });
+        } else if (clientMlStatus !== "fallback") {
+          result = { matched: false, reason: "unclear_face" };
         }
       } catch {
         // A single blurry/no-face frame should not permanently disable
-        // device-side matching; the next frame may be clear.
+        // scanning; the next frame may be clear.
       }
 
       if (!result) {
-        setScannerStatus("Scanning...");
-        try {
-          result = await markAttendanceFromFile(blob);
-        } catch {
-          throw new Error("Face scanner is getting ready. Please refresh and try again.");
-        }
-      } else if (!result.matched) {
-        const clientMiss = result;
-        try {
-          setScannerStatus("Checking again...");
-          result = await markAttendanceFromFile(blob);
-        } catch {
-          result = clientMiss;
-        }
+        result = { matched: false, reason: "unclear_face" };
       }
 
       if (result.matched) {
@@ -337,6 +360,7 @@ export default function App() {
         setScannerStatus("Recognized. Continuing scan...");
         setFlashState(result.already_marked ? "already" : "success");
         setTimeout(() => setFlashState(null), 1400);
+        nextPauseMs = SCAN_SUCCESS_PAUSE_MS;
         if (adminAuthenticated) await loadAll();
       } else {
         setScannerStatus("No match yet. Keep face centered.");
@@ -350,6 +374,7 @@ export default function App() {
     } finally {
       setCameraLoading(false);
       scanInFlightRef.current = false;
+      nextScanAllowedAtRef.current = Date.now() + nextPauseMs;
     }
   }
 
@@ -695,7 +720,7 @@ export default function App() {
     if (!scannerAuthenticated) return;
     if (portal !== "attendance" || !cameraOpen || !videoReady) return;
     setScannerStatus("Auto scanning...");
-    const intervalId = window.setInterval(scanAttendanceFrame, 1500);
+    const intervalId = window.setInterval(scanAttendanceFrame, 350);
     scanAttendanceFrame();
     return () => window.clearInterval(intervalId);
   }, [portal, cameraOpen, videoReady, streamVersion, scannerAuthenticated, clientMlStatus]);
