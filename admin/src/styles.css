@@ -542,6 +542,24 @@ tr:hover td {
   line-height: 1.45;
 }
 
+.optimization-note {
+  margin: 8px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.optimization-note.inline {
+  display: inline-flex;
+  margin: 9px 0 0;
+  padding: 6px 9px;
+}
+
 .dms-empty-hint {
   display: grid;
   gap: 4px;

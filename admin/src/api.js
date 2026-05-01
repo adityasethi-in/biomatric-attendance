@@ -172,6 +172,40 @@ export async function registerStudentSamples({ studentCode, fullName, personType
   return parseResponse(r, "Registration failed");
 }
 
+export async function registerStudentClientSamples({
+  studentCode,
+  fullName,
+  personType,
+  embeddings,
+  qualityScores = [],
+  allowDuplicate = false,
+  dmsPersonKind = "",
+  dmsPersonId = "",
+  model,
+}) {
+  const r = await fetch(`${API_BASE}/students/register-client-samples`, {
+    method: "POST",
+    headers: {
+      ...adminHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      student_code: studentCode,
+      full_name: fullName,
+      person_type: personType,
+      allow_duplicate: allowDuplicate,
+      dms_person_kind: dmsPersonKind,
+      dms_person_id: dmsPersonId,
+      embeddings,
+      quality_scores: qualityScores,
+      model_name: model?.name,
+      model_version: model?.version,
+    }),
+  });
+
+  return parseResponse(r, "Client registration failed");
+}
+
 export async function checkDuplicateStudentSamples({ studentCode, files }) {
   const form = new FormData();
   form.append("student_code", studentCode);
@@ -184,6 +218,24 @@ export async function checkDuplicateStudentSamples({ studentCode, files }) {
   });
 
   return parseResponse(r, "Duplicate face check failed");
+}
+
+export async function checkDuplicateStudentClientSamples({ studentCode, embeddings, model }) {
+  const r = await fetch(`${API_BASE}/students/check-duplicate-client`, {
+    method: "POST",
+    headers: {
+      ...adminHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      student_code: studentCode,
+      embeddings,
+      model_name: model?.name,
+      model_version: model?.version,
+    }),
+  });
+
+  return parseResponse(r, "Client duplicate face check failed");
 }
 export async function deleteStudent(studentId) {
   const r = await fetch(`${API_BASE}/students/${studentId}`, {
@@ -255,4 +307,22 @@ export async function markAttendanceFromFile(file) {
   });
 
   return parseResponse(r, "Attendance failed");
+}
+
+export async function markAttendanceWithEmbedding({ embedding, qualityScore, model }) {
+  const r = await fetch(`${API_BASE}/attendance/mark-client`, {
+    method: "POST",
+    headers: {
+      ...scannerHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      embedding,
+      quality_score: qualityScore,
+      model_name: model?.name,
+      model_version: model?.version,
+    }),
+  });
+
+  return parseResponse(r, "Client attendance failed");
 }

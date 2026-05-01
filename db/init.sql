@@ -18,6 +18,16 @@ CREATE TABLE IF NOT EXISTS face_embeddings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS client_face_embeddings (
+  id SERIAL PRIMARY KEY,
+  student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  model_name VARCHAR(80) NOT NULL DEFAULT 'face-api-128',
+  model_version VARCHAR(80) NOT NULL DEFAULT 'vladmandic-face-api-1.7.15',
+  embedding vector(128) NOT NULL,
+  quality_score INT DEFAULT 100,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS attendance_logs (
   id SERIAL PRIMARY KEY,
   student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -31,6 +41,10 @@ CREATE INDEX IF NOT EXISTS idx_students_dms_person ON students(dms_person_kind, 
 CREATE INDEX IF NOT EXISTS idx_attendance_marked_at ON attendance_logs(marked_at);
 CREATE INDEX IF NOT EXISTS idx_face_embeddings_ivfflat
 ON face_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX IF NOT EXISTS idx_client_face_embeddings_model
+ON client_face_embeddings(model_name, model_version);
+CREATE INDEX IF NOT EXISTS idx_client_face_embeddings_ivfflat
+ON client_face_embeddings USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
 
 CREATE TABLE IF NOT EXISTS organizations (
   id SERIAL PRIMARY KEY,

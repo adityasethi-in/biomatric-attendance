@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
+import math
+
 import httpx
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -31,7 +33,6 @@ from .dms_link import (
     health_check as dms_health_check,
     outbox_worker,
 )
-from .face_engine import FaceEngine
 from .security import admin_token, admin_token_secret, hash_password, verify_password
 
 
@@ -46,6 +47,14 @@ def _csv_env(name: str) -> list[str]:
 
 THRESH = float(os.getenv("FACE_MATCH_THRESHOLD", "0.60"))
 DUPLICATE_THRESH = float(os.getenv("FACE_DUPLICATE_THRESHOLD", os.getenv("FACE_MATCH_THRESHOLD", "0.60")))
+CLIENT_FACE_MATCH_THRESHOLD = float(os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.58"))
+CLIENT_FACE_DUPLICATE_THRESHOLD = float(
+    os.getenv("CLIENT_FACE_DUPLICATE_THRESHOLD", os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.58"))
+)
+CLIENT_FACE_EMBEDDING_DIM = int(os.getenv("CLIENT_FACE_EMBEDDING_DIM", "128"))
+CLIENT_FACE_MODEL_NAME = os.getenv("CLIENT_FACE_MODEL_NAME", "face-api-128").strip() or "face-api-128"
+CLIENT_FACE_MODEL_VERSION = os.getenv("CLIENT_FACE_MODEL_VERSION", "vladmandic-face-api-1.7.15").strip()
+FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "server").lower()
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 VALID_PERSON_TYPES = {"student", "staff", "teacher"}
@@ -83,6 +92,16 @@ CREATE TABLE IF NOT EXISTS face_embeddings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS client_face_embeddings (
+  id SERIAL PRIMARY KEY,
+  student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  model_name VARCHAR(80) NOT NULL DEFAULT 'face-api-128',
+  model_version VARCHAR(80) NOT NULL DEFAULT 'vladmandic-face-api-1.7.15',
+  embedding vector(128) NOT NULL,
+  quality_score INT DEFAULT 100,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS attendance_logs (
   id SERIAL PRIMARY KEY,
   student_id INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -96,6 +115,10 @@ CREATE INDEX IF NOT EXISTS idx_students_dms_person ON students(dms_person_kind, 
 CREATE INDEX IF NOT EXISTS idx_attendance_marked_at ON attendance_logs(marked_at);
 CREATE INDEX IF NOT EXISTS idx_face_embeddings_ivfflat
 ON face_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX IF NOT EXISTS idx_client_face_embeddings_model
+ON client_face_embeddings(model_name, model_version);
+CREATE INDEX IF NOT EXISTS idx_client_face_embeddings_ivfflat
+ON client_face_embeddings USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
 """
 
 CENTRAL_SCHEMA_SQL = """
@@ -150,7 +173,23 @@ def rate_limit_key(request: Request) -> str:
 
 
 limiter = Limiter(key_func=rate_limit_key, default_limits=["120/minute"])
-engine = FaceEngine()
+_face_engine = None
+
+
+def get_face_engine():
+    """Lazy-load the heavy server model only when the legacy image API needs it."""
+    if FACE_ENGINE_MODE in {"client", "off", "disabled", "false", "0"}:
+        raise HTTPException(
+            status_code=503,
+            detail="Server face engine is disabled. Use client-side embedding endpoints.",
+        )
+
+    global _face_engine
+    if _face_engine is None:
+        from .face_engine import FaceEngine
+
+        _face_engine = FaceEngine()
+    return _face_engine
 
 
 @asynccontextmanager
@@ -227,6 +266,13 @@ async def lifespan(app: FastAPI):
                 },
             )
         await db.commit()
+
+    async with SessionLocal() as db:
+        schemas = (
+            await db.execute(text("SELECT database_name FROM organizations WHERE status = 'active'"))
+        ).scalars().all()
+    for schema in sorted({DEFAULT_SCHEMA if item == "fras" else (item or DEFAULT_SCHEMA) for item in schemas}):
+        await ensure_tenant_schema(schema)
 
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(outbox_worker(SessionLocal, stop_event))
@@ -400,7 +446,18 @@ async def require_operator(
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "liveness_mode": LIVENESS_MODE, "version": app.version}
+    return {
+        "ok": True,
+        "liveness_mode": LIVENESS_MODE,
+        "face_engine_mode": FACE_ENGINE_MODE,
+        "client_face_model": {
+            "name": CLIENT_FACE_MODEL_NAME,
+            "version": CLIENT_FACE_MODEL_VERSION,
+            "dimension": CLIENT_FACE_EMBEDDING_DIM,
+            "threshold": CLIENT_FACE_MATCH_THRESHOLD,
+        },
+        "version": app.version,
+    }
 
 
 @app.get("/")
@@ -615,6 +672,40 @@ def to_vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(f"{v:.8f}" for v in embedding) + "]"
 
 
+def validate_client_embedding(embedding, expected_dim: int = CLIENT_FACE_EMBEDDING_DIM) -> list[float]:
+    if not isinstance(embedding, list) or len(embedding) != expected_dim:
+        raise HTTPException(status_code=400, detail=f"embedding must be a {expected_dim}-number list")
+
+    cleaned = []
+    for value in embedding:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="embedding contains a non-numeric value")
+        if not math.isfinite(number):
+            raise HTTPException(status_code=400, detail="embedding contains an invalid number")
+        cleaned.append(number)
+
+    norm = math.sqrt(sum(value * value for value in cleaned))
+    if norm <= 0.0001:
+        raise HTTPException(status_code=400, detail="embedding is empty")
+    return cleaned
+
+
+def validate_client_embeddings(raw_embeddings, min_count: int = 1, max_count: int = 10) -> list[list[float]]:
+    if not isinstance(raw_embeddings, list) or len(raw_embeddings) < min_count:
+        raise HTTPException(status_code=400, detail=f"Capture at least {min_count} client face samples")
+    if len(raw_embeddings) > max_count:
+        raw_embeddings = raw_embeddings[:max_count]
+    return [validate_client_embedding(item) for item in raw_embeddings]
+
+
+def client_confidence(distance: float, threshold: float = CLIENT_FACE_MATCH_THRESHOLD) -> int:
+    if threshold <= 0:
+        return 0
+    return max(0, min(100, round((1.0 - (distance / threshold)) * 100)))
+
+
 def should_check_liveness() -> bool:
     return LIVENESS_MODE in {"basic", "strict"}
 
@@ -637,6 +728,7 @@ def _coerce_uuid(value: str | None):
 
 
 async def embedding_from_upload(upload: UploadFile):
+    engine = get_face_engine()
     img_bytes = await upload.read()
     img = engine.decode_image(img_bytes)
     if img is None:
@@ -725,6 +817,84 @@ async def ensure_not_duplicate_face(
     return duplicate if is_duplicate else None
 
 
+async def find_duplicate_client_face(
+    db: AsyncSession,
+    embeddings: list[list[float]],
+    exclude_student_code: str = "",
+    model_name: str = CLIENT_FACE_MODEL_NAME,
+    model_version: str = CLIENT_FACE_MODEL_VERSION,
+):
+    best = None
+    exclude_code = exclude_student_code.strip()
+
+    for emb in embeddings:
+        result = await db.execute(
+            text(
+                """
+                SELECT cfe.student_id, s.student_code, s.full_name, s.person_type,
+                       (cfe.embedding <-> CAST(:emb AS vector)) AS distance
+                FROM client_face_embeddings cfe
+                JOIN students s ON s.id = cfe.student_id
+                WHERE cfe.model_name = :model_name
+                  AND cfe.model_version = :model_version
+                  AND (:exclude_code = '' OR s.student_code <> :exclude_code)
+                ORDER BY cfe.embedding <-> CAST(:emb AS vector)
+                LIMIT 1
+                """
+            ),
+            {
+                "emb": to_vector_literal(emb),
+                "exclude_code": exclude_code,
+                "model_name": model_name,
+                "model_version": model_version,
+            },
+        )
+        row = result.mappings().first()
+        if row and (best is None or float(row["distance"]) < best["distance"]):
+            distance = float(row["distance"])
+            best = {
+                "student_id": row["student_id"],
+                "student_code": row["student_code"],
+                "full_name": row["full_name"],
+                "person_type": row["person_type"],
+                "distance": distance,
+                "confidence": client_confidence(distance, CLIENT_FACE_DUPLICATE_THRESHOLD),
+                "engine": "client",
+            }
+
+    return best
+
+
+async def ensure_not_duplicate_client_face(
+    db: AsyncSession,
+    embeddings: list[list[float]],
+    student_code: str,
+    allow_duplicate: bool,
+    model_name: str,
+    model_version: str,
+):
+    duplicate = await find_duplicate_client_face(
+        db,
+        embeddings,
+        exclude_student_code=student_code,
+        model_name=model_name,
+        model_version=model_version,
+    )
+    is_duplicate = bool(duplicate and duplicate["distance"] <= CLIENT_FACE_DUPLICATE_THRESHOLD)
+
+    if is_duplicate and not allow_duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Possible duplicate face found",
+                "match": duplicate,
+                "threshold": CLIENT_FACE_DUPLICATE_THRESHOLD,
+            },
+        )
+
+    return duplicate if is_duplicate else None
+
+
 async def _upsert_student(
     db: AsyncSession,
     student_code: str,
@@ -732,6 +902,7 @@ async def _upsert_student(
     person_type: str,
     dms_person_kind: str | None,
     dms_person_id: UUID | None,
+    clear_server_embeddings: bool = True,
 ):
     existing = await db.execute(
         text("SELECT id FROM students WHERE student_code = :code"), {"code": student_code}
@@ -758,10 +929,11 @@ async def _upsert_student(
                 "dms_id": str(dms_person_id) if dms_person_id else None,
             },
         )
-        await db.execute(
-            text("DELETE FROM face_embeddings WHERE student_id = :sid"),
-            {"sid": existing_student.id},
-        )
+        if clear_server_embeddings:
+            await db.execute(
+                text("DELETE FROM face_embeddings WHERE student_id = :sid"),
+                {"sid": existing_student.id},
+            )
         return result.first(), True
 
     result = await db.execute(
@@ -900,6 +1072,197 @@ async def check_duplicate_student(
     }
 
 
+@app.post("/students/check-duplicate-client")
+async def check_duplicate_student_client(
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_tenant_db),
+    _admin: dict = Depends(require_admin),
+):
+    embeddings = validate_client_embeddings(payload.get("embeddings"), min_count=1)
+    student_code = str(payload.get("student_code") or "")
+    model_name = str(payload.get("model_name") or CLIENT_FACE_MODEL_NAME)
+    model_version = str(payload.get("model_version") or CLIENT_FACE_MODEL_VERSION)
+    match = await find_duplicate_client_face(
+        db,
+        embeddings,
+        exclude_student_code=student_code,
+        model_name=model_name,
+        model_version=model_version,
+    )
+    duplicate = bool(match and match["distance"] <= CLIENT_FACE_DUPLICATE_THRESHOLD)
+
+    return {
+        "duplicate": duplicate,
+        "match": match if duplicate else None,
+        "nearest_match": match,
+        "threshold": CLIENT_FACE_DUPLICATE_THRESHOLD,
+        "sample_count": len(embeddings),
+        "engine": "client",
+    }
+
+
+@app.post("/students/register-client-samples")
+async def register_student_client_samples(
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_tenant_db),
+    _admin: dict = Depends(require_admin),
+):
+    student_code = str(payload.get("student_code") or "").strip()
+    full_name = str(payload.get("full_name") or "").strip()
+    if not student_code or not full_name:
+        raise HTTPException(status_code=400, detail="student_code and full_name are required")
+
+    person_type = normalize_person_type(str(payload.get("person_type") or "student"))
+    allow_duplicate = bool(payload.get("allow_duplicate", False))
+    dms_kind = str(payload.get("dms_person_kind") or "").strip().lower() or None
+    if dms_kind and dms_kind not in {"student", "teacher"}:
+        raise HTTPException(status_code=400, detail="dms_person_kind must be student or teacher")
+    dms_uuid = _coerce_uuid(payload.get("dms_person_id")) if dms_kind else None
+
+    model_name = str(payload.get("model_name") or CLIENT_FACE_MODEL_NAME)
+    model_version = str(payload.get("model_version") or CLIENT_FACE_MODEL_VERSION)
+    embeddings = validate_client_embeddings(payload.get("embeddings"), min_count=5)
+    quality_scores = payload.get("quality_scores") or []
+
+    duplicate = await ensure_not_duplicate_client_face(
+        db,
+        embeddings,
+        student_code,
+        allow_duplicate,
+        model_name,
+        model_version,
+    )
+
+    s, re_enrolled = await _upsert_student(
+        db,
+        student_code,
+        full_name,
+        person_type,
+        dms_kind,
+        dms_uuid,
+        clear_server_embeddings=False,
+    )
+    await db.execute(text("DELETE FROM client_face_embeddings WHERE student_id = :sid"), {"sid": s.id})
+
+    for index, emb in enumerate(embeddings):
+        raw_quality = quality_scores[index] if index < len(quality_scores) else 1.0
+        try:
+            quality = int(float(raw_quality) * 100)
+        except (TypeError, ValueError):
+            quality = 100
+        await db.execute(
+            text(
+                """
+                INSERT INTO client_face_embeddings
+                  (student_id, model_name, model_version, embedding, quality_score)
+                VALUES (:sid, :model_name, :model_version, CAST(:emb AS vector), :q)
+                """
+            ),
+            {
+                "sid": s.id,
+                "model_name": model_name,
+                "model_version": model_version,
+                "emb": to_vector_literal(emb),
+                "q": max(0, min(100, quality)),
+            },
+        )
+
+    await db.commit()
+
+    return {
+        "id": s.id,
+        "student_code": s.student_code,
+        "full_name": s.full_name,
+        "person_type": s.person_type,
+        "dms_person_kind": s.dms_person_kind,
+        "dms_person_id": str(s.dms_person_id) if s.dms_person_id else None,
+        "sample_count": len(embeddings),
+        "re_enrolled": re_enrolled,
+        "duplicate_override": bool(duplicate),
+        "engine": "client",
+        "model_name": model_name,
+        "model_version": model_version,
+    }
+
+
+async def finalize_attendance_match(
+    db: AsyncSession,
+    operator: dict,
+    row,
+    distance: float,
+    confidence: int,
+    engine_name: str,
+):
+    existing_log = await db.execute(
+        text(
+            """
+            SELECT id, marked_at
+            FROM attendance_logs
+            WHERE student_id = :sid
+              AND (marked_at AT TIME ZONE :tz)::date = (now() AT TIME ZONE :tz)::date
+            ORDER BY marked_at DESC
+            LIMIT 1
+            """
+        ),
+        {"sid": row["student_id"], "tz": APP_TIMEZONE},
+    )
+    existing = existing_log.first()
+    if existing:
+        return {
+            "matched": True,
+            "already_marked": True,
+            "student_id": row["student_id"],
+            "name": row["full_name"],
+            "person_type": row["person_type"],
+            "distance": distance,
+            "confidence": confidence,
+            "attendance_id": existing.id,
+            "marked_at": str(existing.marked_at),
+            "dms_synced": bool(row["dms_person_id"]),
+            "engine": engine_name,
+        }
+
+    log = await db.execute(
+        text(
+            """
+            INSERT INTO attendance_logs (student_id, status, confidence)
+            VALUES (:sid, 'present', :conf)
+            RETURNING id, marked_at
+            """
+        ),
+        {"sid": row["student_id"], "conf": confidence},
+    )
+    l = log.first()
+    await db.commit()
+
+    if row["dms_person_kind"] and row["dms_person_id"] and operator.get("dms_base_url") and operator.get("dms_webhook_secret"):
+        async with SessionLocal() as central_db:
+            await enqueue_attendance(
+                central_db,
+                organization_id=operator["organization_id"],
+                person_kind=row["dms_person_kind"],
+                person_id=str(row["dms_person_id"]),
+                marked_at=l.marked_at if isinstance(l.marked_at, datetime) else datetime.now(timezone.utc),
+                confidence=confidence,
+                source_ref=f"biomatric:{operator['slug']}:{row['student_code']}",
+            )
+            await central_db.commit()
+
+    return {
+        "matched": True,
+        "already_marked": False,
+        "student_id": row["student_id"],
+        "name": row["full_name"],
+        "person_type": row["person_type"],
+        "distance": distance,
+        "confidence": confidence,
+        "attendance_id": l.id,
+        "marked_at": str(l.marked_at),
+        "dms_synced": bool(row["dms_person_kind"] and row["dms_person_id"]),
+        "engine": engine_name,
+    }
+
+
 @app.post("/attendance/mark")
 @limiter.limit("60/minute")
 async def mark_attendance(
@@ -908,6 +1271,7 @@ async def mark_attendance(
     db: AsyncSession = Depends(get_tenant_db),
     operator: dict = Depends(require_operator),
 ):
+    engine = get_face_engine()
     img_bytes = await image.read()
     img = engine.decode_image(img_bytes)
     if img is None:
@@ -934,79 +1298,79 @@ async def mark_attendance(
         ),
         {"emb": to_vector_literal(emb)},
     )
-    row = result.first()
+    row = result.mappings().first()
 
-    if not row or float(row.distance) > THRESH:
+    if not row or float(row["distance"]) > THRESH:
         return {
             "matched": False,
             "reason": "unknown_face",
-            "distance": None if not row else float(row.distance),
+            "distance": None if not row else float(row["distance"]),
+            "engine": "server",
         }
 
-    existing_log = await db.execute(
+    distance = float(row["distance"])
+    return await finalize_attendance_match(
+        db,
+        operator,
+        row,
+        distance=distance,
+        confidence=max(0, min(100, int((1.0 - distance) * 100))),
+        engine_name="server",
+    )
+
+
+@app.post("/attendance/mark-client")
+@limiter.limit("90/minute")
+async def mark_attendance_client(
+    request: Request,
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_tenant_db),
+    operator: dict = Depends(require_operator),
+):
+    embedding = validate_client_embedding(payload.get("embedding"))
+    model_name = str(payload.get("model_name") or CLIENT_FACE_MODEL_NAME)
+    model_version = str(payload.get("model_version") or CLIENT_FACE_MODEL_VERSION)
+
+    result = await db.execute(
         text(
             """
-            SELECT id, marked_at
-            FROM attendance_logs
-            WHERE student_id = :sid
-              AND (marked_at AT TIME ZONE :tz)::date = (now() AT TIME ZONE :tz)::date
-            ORDER BY marked_at DESC
+            SELECT cfe.student_id, s.full_name, s.person_type,
+                   s.dms_person_kind, s.dms_person_id, s.student_code,
+                   (cfe.embedding <-> CAST(:emb AS vector)) AS distance
+            FROM client_face_embeddings cfe
+            JOIN students s ON s.id = cfe.student_id
+            WHERE cfe.model_name = :model_name
+              AND cfe.model_version = :model_version
+            ORDER BY cfe.embedding <-> CAST(:emb AS vector)
             LIMIT 1
             """
         ),
-        {"sid": row.student_id, "tz": APP_TIMEZONE},
+        {
+            "emb": to_vector_literal(embedding),
+            "model_name": model_name,
+            "model_version": model_version,
+        },
     )
-    existing = existing_log.first()
-    if existing:
+    row = result.mappings().first()
+
+    if not row or float(row["distance"]) > CLIENT_FACE_MATCH_THRESHOLD:
         return {
-            "matched": True,
-            "already_marked": True,
-            "student_id": row.student_id,
-            "name": row.full_name,
-            "person_type": row.person_type,
-            "distance": float(row.distance),
-            "attendance_id": existing.id,
-            "marked_at": str(existing.marked_at),
-            "dms_synced": bool(row.dms_person_id),
+            "matched": False,
+            "reason": "unknown_face",
+            "distance": None if not row else float(row["distance"]),
+            "confidence": 0 if not row else client_confidence(float(row["distance"])),
+            "engine": "client",
         }
 
-    log = await db.execute(
-        text(
-            """
-            INSERT INTO attendance_logs (student_id, status, confidence)
-            VALUES (:sid, 'present', :conf)
-            RETURNING id, marked_at
-            """
-        ),
-        {"sid": row.student_id, "conf": int((1.0 - float(row.distance)) * 100)},
+    distance = float(row["distance"])
+    return await finalize_attendance_match(
+        db,
+        operator,
+        row,
+        distance=distance,
+        confidence=client_confidence(distance),
+        engine_name="client",
     )
-    l = log.first()
-    await db.commit()
-
-    if row.dms_person_kind and row.dms_person_id and operator.get("dms_base_url") and operator.get("dms_webhook_secret"):
-        async with SessionLocal() as central_db:
-            await enqueue_attendance(
-                central_db,
-                organization_id=operator["organization_id"],
-                person_kind=row.dms_person_kind,
-                person_id=str(row.dms_person_id),
-                marked_at=l.marked_at if isinstance(l.marked_at, datetime) else datetime.now(timezone.utc),
-                confidence=int((1.0 - float(row.distance)) * 100),
-                source_ref=f"biomatric:{operator['slug']}:{row.student_code}",
-            )
-            await central_db.commit()
-
-    return {
-        "matched": True,
-        "already_marked": False,
-        "student_id": row.student_id,
-        "name": row.full_name,
-        "person_type": row.person_type,
-        "distance": float(row.distance),
-        "attendance_id": l.id,
-        "marked_at": str(l.marked_at),
-        "dms_synced": bool(row.dms_person_kind and row.dms_person_id),
-    }
 
 
 @app.get("/students")
@@ -1016,9 +1380,12 @@ async def list_students(db: AsyncSession = Depends(get_tenant_db), _admin: dict 
             """
             SELECT s.id, s.student_code, s.full_name, s.person_type,
                    s.dms_person_kind, s.dms_person_id, s.created_at,
-                   COUNT(fe.id) AS sample_count
+                   COUNT(DISTINCT fe.id) AS server_sample_count,
+                   COUNT(DISTINCT cfe.id) AS client_sample_count,
+                   COUNT(DISTINCT fe.id) + COUNT(DISTINCT cfe.id) AS sample_count
             FROM students s
             LEFT JOIN face_embeddings fe ON fe.student_id = s.id
+            LEFT JOIN client_face_embeddings cfe ON cfe.student_id = s.id
             GROUP BY s.id, s.student_code, s.full_name, s.person_type,
                      s.dms_person_kind, s.dms_person_id, s.created_at
             ORDER BY s.id DESC
@@ -1063,7 +1430,14 @@ async def admin_summary(db: AsyncSession = Depends(get_tenant_db), admin: dict =
     )).mappings().first()
 
     samples = (await db.execute(
-        text("SELECT COUNT(*) AS total_samples FROM face_embeddings")
+        text(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM face_embeddings) AS server_samples,
+              (SELECT COUNT(*) FROM client_face_embeddings) AS client_samples,
+              (SELECT COUNT(*) FROM face_embeddings) + (SELECT COUNT(*) FROM client_face_embeddings) AS total_samples
+            """
+        )
     )).mappings().first()
 
     async with SessionLocal() as central:
