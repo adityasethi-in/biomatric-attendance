@@ -1,0 +1,63 @@
+services:
+  # NOTE: BIOMATRIC no longer ships its own Postgres. It shares the
+  # `delight_school` database from the DMS stack and isolates its tables
+  # inside the `biomatric` schema. Bring up the DMS stack first:
+  #     cd "../DELIGHT MODEL SCHOOL - CLAUDE" && docker compose up -d db
+  # That creates the `school-net` network and the database both stacks use.
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fras_backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@${DB_HOST:-dms-db}:5432/${POSTGRES_DB:-delight_school}
+      BIOMATRIC_DB_SCHEMA: ${BIOMATRIC_DB_SCHEMA:-biomatric}
+      FACE_MATCH_THRESHOLD: ${FACE_MATCH_THRESHOLD:-0.60}
+      FACE_DUPLICATE_THRESHOLD: ${FACE_DUPLICATE_THRESHOLD:-0.60}
+      LIVENESS_MODE: ${LIVENESS_MODE:-basic}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Kolkata}
+      PRICE_PER_USER_PER_DAY: ${PRICE_PER_USER_PER_DAY:-3}
+      DEFAULT_BILLING_DAYS: ${DEFAULT_BILLING_DAYS:-30}
+      DEFAULT_FREE_ORG_NAME: ${DEFAULT_FREE_ORG_NAME:-Delight Model School}
+      DEFAULT_FREE_ORG_SLUG: ${DEFAULT_FREE_ORG_SLUG:-delight-model-school}
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD}
+      ADMIN_TOKEN_SECRET: ${ADMIN_TOKEN_SECRET:?set ADMIN_TOKEN_SECRET in .env (openssl rand -hex 32)}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:7200}
+      DMS_BASE_URL: ${DMS_BASE_URL:-http://dms-backend:8000/api/v1}
+      DMS_WEBHOOK_SECRET: ${DMS_WEBHOOK_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:7000:7000"
+    volumes:
+      - insightface_models:/root/.insightface
+    networks:
+      - school-net
+
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: fras_admin
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7200:80"
+    depends_on:
+      - backend
+    networks:
+      - school-net
+
+volumes:
+  insightface_models:
+
+networks:
+  # Shared with the DMS stack. The DMS compose file creates this network
+  # (and the database). Marking it `external: true` here means BIOMATRIC
+  # joins the existing network instead of creating its own.
+  school-net:
+    name: school-net
+    external: true

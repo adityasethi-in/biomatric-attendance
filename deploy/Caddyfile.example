@@ -1,0 +1,31 @@
+# Replace these domains before copying to /etc/caddy/Caddyfile.
+#
+# Camera access on mobile browsers requires HTTPS. Caddy will automatically
+# issue and renew Let's Encrypt certificates after DNS points to the server.
+
+attendance.yourdomain.com {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:7200
+}
+
+# Optional: DMS frontend on the same server.
+# Change 3000 to the host port used by your DMS frontend.
+dms.yourdomain.com {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:3000
+}
+
+# Optional: static website 1.
+# If you keep static sites on this server, put files in this folder.
+site1.yourdomain.com {
+	root * /var/www/site1
+	file_server
+	encode gzip zstd
+}
+
+# Optional: static website 2.
+site2.yourdomain.com {
+	root * /var/www/site2
+	file_server
+	encode gzip zstd
+}
