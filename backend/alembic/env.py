@@ -4,7 +4,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, event, pool
 
 
 config = context.config
@@ -16,6 +16,8 @@ if not database_url:
     raise RuntimeError("DATABASE_URL is required for Alembic migrations")
 config.set_main_option("sqlalchemy.url", database_url.replace("+asyncpg", ""))
 
+SCHEMA = os.getenv("BIOMATRIC_DB_SCHEMA", "biomatric").strip() or "biomatric"
+
 target_metadata = None
 
 
@@ -25,6 +27,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=SCHEMA,
+        include_schemas=True,
     )
 
     with context.begin_transaction():
@@ -38,8 +42,24 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
+    @event.listens_for(connectable, "connect")
+    def _bootstrap_schema(dbapi_conn, _conn_rec):
+        prev_autocommit = dbapi_conn.autocommit
+        dbapi_conn.autocommit = True
+        try:
+            with dbapi_conn.cursor() as cur:
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"')
+                cur.execute(f'SET search_path TO "{SCHEMA}", public')
+        finally:
+            dbapi_conn.autocommit = prev_autocommit
+
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=SCHEMA,
+            include_schemas=True,
+        )
 
         with context.begin_transaction():
             context.run_migrations()
