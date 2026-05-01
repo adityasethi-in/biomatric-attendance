@@ -210,14 +210,13 @@ Generate secret:
 openssl rand -hex 32
 ```
 
-For the low-RAM hybrid deployment, first keep:
+For older deployments that still need to migrate sample data, first keep:
 
 ```env
 FACE_ENGINE_MODE=server
 ```
 
-After the updated browser UI has re-registered profiles with client-side face
-vectors, switch to:
+After profiles have fresh camera samples, switch to:
 
 ```env
 FACE_ENGINE_MODE=client
@@ -225,10 +224,8 @@ CLIENT_FACE_MATCH_THRESHOLD=0.58
 CLIENT_FACE_DUPLICATE_THRESHOLD=0.58
 ```
 
-In `client` mode the backend does not load the heavy Python face-recognition
-model. The mobile/browser creates the 128-d face vector and the server only
-does vector matching plus attendance storage. Keep `server` mode while old
-profiles only have the legacy 512-d server embeddings.
+Keep `server` mode only while old profiles still need migration. For the
+current hosted setup, use `client` mode after fresh samples exist.
 
 ## 7. Start BIOMATRIC
 

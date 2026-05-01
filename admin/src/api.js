@@ -75,8 +75,12 @@ async function parseResponse(r, fallbackMessage) {
   }
   if (!r.ok) {
     const detail = data.detail;
+    const rawMessage = typeof detail === "string" ? detail : detail?.message || fallbackMessage;
+    const safeMessage = /face[_ -]?engine|embedding|fallback/i.test(rawMessage)
+      ? "Face scanner is getting ready. Please refresh and try again."
+      : rawMessage;
     const error = new Error(
-      typeof detail === "string" ? detail : detail?.message || fallbackMessage
+      safeMessage
     );
     error.status = r.status;
     error.data = data;

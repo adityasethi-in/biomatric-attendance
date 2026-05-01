@@ -296,7 +296,7 @@ export default function App() {
       let result;
       try {
         if (clientMlStatus !== "fallback" && !clientMlFailedRef.current) {
-          setScannerStatus(clientMlStatus === "ready" ? "Scanning on this device..." : "Loading device face model...");
+          setScannerStatus(clientMlStatus === "ready" ? "Scanning..." : "Preparing scanner...");
           const descriptor = await getClientFaceDescriptor(blob);
           result = await markAttendanceWithEmbedding({
             embedding: descriptor.embedding,
@@ -310,12 +310,16 @@ export default function App() {
       }
 
       if (!result) {
-        setScannerStatus("Using server fallback scan...");
-        result = await markAttendanceFromFile(blob);
+        setScannerStatus("Scanning...");
+        try {
+          result = await markAttendanceFromFile(blob);
+        } catch {
+          throw new Error("Face scanner is getting ready. Please refresh and try again.");
+        }
       } else if (!result.matched) {
         const clientMiss = result;
         try {
-          setScannerStatus("Checking server fallback...");
+          setScannerStatus("Checking again...");
           result = await markAttendanceFromFile(blob);
         } catch {
           result = clientMiss;
@@ -400,7 +404,7 @@ export default function App() {
         });
       }
       setMessage(
-        `${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} with ${result.sample_count} face samples${result.engine === "client" ? " on device" : ""}.${result.dms_person_id ? " Linked to DMS." : ""}`
+        `${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} with ${result.sample_count} face samples.${result.dms_person_id ? " Linked to DMS." : ""}`
       );
       setStudentCode("");
       setFullName("");
@@ -452,12 +456,12 @@ export default function App() {
         setClientMlStatus("ready");
         clientMlFailedRef.current = false;
       } catch {
-        // If one enrollment sample is unclear, keep the existing server
-        // registration path as a safe fallback without changing the UI.
+        // If one enrollment sample is unclear, keep the existing registration
+        // path as a safe fallback without changing the UI.
       }
 
       if (!check) {
-        setMessage("Checking duplicate face on server fallback...");
+        setMessage("Checking this face again...");
         check = await checkDuplicateStudentSamples({
           studentCode,
           files: enrollmentSamples,
@@ -470,7 +474,6 @@ export default function App() {
         nearestMatch: check.nearest_match,
         threshold: check.threshold,
         sampleCount: check.sample_count,
-        engine: check.engine || "server",
         clientEmbeddings,
         clientQualityScores,
       });
@@ -793,12 +796,12 @@ export default function App() {
 
       <section className="card">
         <h2>Register Profile</h2>
-        <p className="optimization-note">
+        <p className="scanner-note">
           {clientMlStatus === "ready"
-            ? "Low-server mode ready: face vectors will be created on this device first."
+            ? "Face scanner ready. Capture 5 clear samples."
             : clientMlStatus === "fallback"
-              ? "Device model unavailable here, so registration will use server fallback."
-              : "Preparing low-server face model on this device..."}
+              ? "Face scanner is warming up. Refresh once if capture does not start."
+              : "Preparing face scanner..."}
         </p>
         <form onSubmit={onSubmit}>
           <input placeholder="ID / Roll number" value={studentCode} onChange={(e) => setStudentCode(e.target.value)} required />
@@ -1051,12 +1054,12 @@ export default function App() {
             : "Login first, then scanner will start"}
         </span>
         {scannerAuthenticated && (
-          <small className="optimization-note inline">
+          <small className="scanner-note inline">
             {clientMlStatus === "ready"
-              ? "Device ML active. Server only matches vectors."
+              ? "Scanner ready"
               : clientMlStatus === "fallback"
-                ? "Using server fallback on this device."
-                : "Loading device ML..."}
+                ? "Scanner is warming up"
+                : "Preparing scanner..."}
           </small>
         )}
       </div>

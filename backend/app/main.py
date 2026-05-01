@@ -177,11 +177,11 @@ _face_engine = None
 
 
 def get_face_engine():
-    """Lazy-load the heavy server model only when the legacy image API needs it."""
+    """Start the scanner engine only for the image upload flow."""
     if FACE_ENGINE_MODE in {"client", "off", "disabled", "false", "0"}:
         raise HTTPException(
             status_code=503,
-            detail="Server face engine is disabled. Use client-side embedding endpoints.",
+            detail="Face scanner is not ready. Please refresh and try again.",
         )
 
     global _face_engine
@@ -446,18 +446,7 @@ async def require_operator(
 
 @app.get("/health")
 async def health():
-    return {
-        "ok": True,
-        "liveness_mode": LIVENESS_MODE,
-        "face_engine_mode": FACE_ENGINE_MODE,
-        "client_face_model": {
-            "name": CLIENT_FACE_MODEL_NAME,
-            "version": CLIENT_FACE_MODEL_VERSION,
-            "dimension": CLIENT_FACE_EMBEDDING_DIM,
-            "threshold": CLIENT_FACE_MATCH_THRESHOLD,
-        },
-        "version": app.version,
-    }
+    return {"ok": True, "version": app.version}
 
 
 @app.get("/")
@@ -859,7 +848,6 @@ async def find_duplicate_client_face(
                 "person_type": row["person_type"],
                 "distance": distance,
                 "confidence": client_confidence(distance, CLIENT_FACE_DUPLICATE_THRESHOLD),
-                "engine": "client",
             }
 
     return best
@@ -1097,7 +1085,6 @@ async def check_duplicate_student_client(
         "nearest_match": match,
         "threshold": CLIENT_FACE_DUPLICATE_THRESHOLD,
         "sample_count": len(embeddings),
-        "engine": "client",
     }
 
 
@@ -1179,7 +1166,6 @@ async def register_student_client_samples(
         "sample_count": len(embeddings),
         "re_enrolled": re_enrolled,
         "duplicate_override": bool(duplicate),
-        "engine": "client",
         "model_name": model_name,
         "model_version": model_version,
     }
@@ -1219,7 +1205,6 @@ async def finalize_attendance_match(
             "attendance_id": existing.id,
             "marked_at": str(existing.marked_at),
             "dms_synced": bool(row["dms_person_id"]),
-            "engine": engine_name,
         }
 
     log = await db.execute(
@@ -1259,7 +1244,6 @@ async def finalize_attendance_match(
         "attendance_id": l.id,
         "marked_at": str(l.marked_at),
         "dms_synced": bool(row["dms_person_kind"] and row["dms_person_id"]),
-        "engine": engine_name,
     }
 
 
@@ -1305,7 +1289,6 @@ async def mark_attendance(
             "matched": False,
             "reason": "unknown_face",
             "distance": None if not row else float(row["distance"]),
-            "engine": "server",
         }
 
     distance = float(row["distance"])
@@ -1359,7 +1342,6 @@ async def mark_attendance_client(
             "reason": "unknown_face",
             "distance": None if not row else float(row["distance"]),
             "confidence": 0 if not row else client_confidence(float(row["distance"])),
-            "engine": "client",
         }
 
     distance = float(row["distance"])

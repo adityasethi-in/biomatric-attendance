@@ -1,4 +1,4 @@
-"""Add client-side face embeddings table.
+"""Add browser face samples table.
 
 Revision ID: 0003_client_face_embeddings
 Revises: 0002_widen_password_hash
