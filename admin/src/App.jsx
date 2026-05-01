@@ -667,7 +667,7 @@ export default function App() {
               {dmsStatus.error && <small className="error-text">Last check: {dmsStatus.error}</small>}
             </div>
             {summary && (summary.dms_failing || 0) > 0 && (
-              <p className="app-message">{summary.dms_failing} webhook(s) currently failing — check DMS health.</p>
+          <p className="app-message">{summary.dms_failing} DMS sync item(s) need attention. Open DMS Outbox for details.</p>
             )}
             <button type="button" className="ghost-button" onClick={onDmsDisconnect} disabled={loading}>
               Unlink DMS
