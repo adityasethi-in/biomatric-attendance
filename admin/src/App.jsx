@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   checkDuplicateStudentSamples,
-  checkDuplicateStudentClientSamples,
   clearAdminSession,
   clearAttendance,
   clearScannerSession,
@@ -19,20 +18,13 @@ import {
   getStudents,
   getSummary,
   loginAdmin,
-  markAttendanceWithEmbedding,
+  markAttendanceFromFile,
   registerOrganization,
-  registerStudentClientSamples,
   registerStudentSamples,
   setActiveOrgSlug,
   setAdminSession,
   setScannerSession,
 } from "./api";
-import {
-  CLIENT_FACE_MODEL,
-  getClientFaceDescriptor,
-  getClientFaceDescriptorsFromBlobs,
-  loadClientFaceModel,
-} from "./clientFace";
 
 const ENROLLMENT_POSES = [
   "Look straight at the camera",
@@ -42,9 +34,7 @@ const ENROLLMENT_POSES = [
   "Lower your chin slightly",
 ];
 
-const SCAN_FRAME_COUNT = 3;
-const SCAN_FRAME_DELAY_MS = 100;
-const SCAN_COOLDOWN_MS = 100;
+const SCAN_COOLDOWN_MS = 1200;
 const SCAN_SUCCESS_PAUSE_MS = 1800;
 
 const DEFAULT_ORG_SLUG = "delight-model-school";
@@ -113,18 +103,12 @@ export default function App() {
   const [cameraDevices, setCameraDevices] = useState([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [streamVersion, setStreamVersion] = useState(0);
-  const [clientMlStatus, setClientMlStatus] = useState("warming");
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const scanInFlightRef = useRef(false);
   const nextScanAllowedAtRef = useRef(0);
-  const clientMlFailedRef = useRef(false);
-
-  function sleep(ms) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
-  }
 
   async function loadAll() {
     const [s, r, summaryData, statusData] = await Promise.all([
@@ -197,18 +181,6 @@ export default function App() {
         }
       })
       .catch((err) => setMessage(err.message));
-  }, []);
-
-  useEffect(() => {
-    loadClientFaceModel()
-      .then(() => {
-        clientMlFailedRef.current = false;
-        setClientMlStatus("ready");
-      })
-      .catch(() => {
-        clientMlFailedRef.current = true;
-        setClientMlStatus("fallback");
-      });
   }, []);
 
   useEffect(() => {
@@ -290,32 +262,6 @@ export default function App() {
     return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
   }
 
-  async function captureScanPackage() {
-    const blobs = [];
-    const descriptors = [];
-
-    for (let index = 0; index < SCAN_FRAME_COUNT; index += 1) {
-      const blob = await captureCurrentFrame();
-      if (blob) {
-        blobs.push(blob);
-        if (clientMlStatus !== "fallback" && !clientMlFailedRef.current) {
-          try {
-            const descriptor = await getClientFaceDescriptor(blob);
-            descriptors.push(descriptor);
-          } catch {
-            // Ignore one unclear frame; the next two frames may still be good.
-          }
-        }
-      }
-
-      if (index < SCAN_FRAME_COUNT - 1) {
-        await sleep(SCAN_FRAME_DELAY_MS);
-      }
-    }
-
-    return { blobs, descriptors };
-  }
-
   async function scanAttendanceFrame() {
     const now = Date.now();
     if (scanInFlightRef.current || now < nextScanAllowedAtRef.current) return;
@@ -325,29 +271,9 @@ export default function App() {
     let nextPauseMs = SCAN_COOLDOWN_MS;
 
     try {
-      const { blobs, descriptors } = await captureScanPackage();
-      const blob = blobs[0];
+      const blob = await captureCurrentFrame();
       if (!blob) return;
-      let result;
-      try {
-        if (descriptors.length >= 2) {
-          setScannerStatus("Matching...");
-          result = await markAttendanceWithEmbedding({
-            embeddings: descriptors.map((descriptor) => descriptor.embedding),
-            qualityScores: descriptors.map((descriptor) => descriptor.qualityScore),
-            model: CLIENT_FACE_MODEL,
-          });
-        } else if (clientMlStatus !== "fallback") {
-          result = { matched: false, reason: "unclear_face" };
-        }
-      } catch {
-        // A single blurry/no-face frame should not permanently disable
-        // scanning; the next frame may be clear.
-      }
-
-      if (!result) {
-        result = { matched: false, reason: "unclear_face" };
-      }
+      const result = await markAttendanceFromFile(blob);
 
       if (result.matched) {
         const confidence = result.confidence ?? Math.round((1 - result.distance) * 100);
@@ -397,37 +323,15 @@ export default function App() {
         dmsKind = kind;
         dmsId = id;
       }
-      let result;
-      if (decision?.clientEmbeddings?.length >= ENROLLMENT_POSES.length) {
-        try {
-          result = await registerStudentClientSamples({
-            studentCode,
-            fullName,
-            personType,
-            embeddings: decision.clientEmbeddings,
-            qualityScores: decision.clientQualityScores || [],
-            allowDuplicate,
-            dmsPersonKind: dmsKind,
-            dmsPersonId: dmsId,
-            model: CLIENT_FACE_MODEL,
-          });
-        } catch (err) {
-          if (err.status === 409) throw err;
-          result = null;
-        }
-      }
-
-      if (!result) {
-        result = await registerStudentSamples({
-          studentCode,
-          fullName,
-          personType,
-          files: enrollmentSamples,
-          allowDuplicate,
-          dmsPersonKind: dmsKind,
-          dmsPersonId: dmsId,
-        });
-      }
+      const result = await registerStudentSamples({
+        studentCode,
+        fullName,
+        personType,
+        files: enrollmentSamples,
+        allowDuplicate,
+        dmsPersonKind: dmsKind,
+        dmsPersonId: dmsId,
+      });
       setMessage(
         `${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} with ${result.sample_count} face samples.${result.dms_person_id ? " Linked to DMS." : ""}`
       );
@@ -465,33 +369,10 @@ export default function App() {
     setLoading(true);
     setMessage("Checking if this face is already registered...");
     try {
-      let check;
-      let clientEmbeddings = null;
-      let clientQualityScores = null;
-      try {
-        setMessage("Creating face vectors on this device...");
-        const clientData = await getClientFaceDescriptorsFromBlobs(enrollmentSamples);
-        clientEmbeddings = clientData.embeddings;
-        clientQualityScores = clientData.qualityScores;
-        check = await checkDuplicateStudentClientSamples({
-          studentCode,
-          embeddings: clientEmbeddings,
-          model: CLIENT_FACE_MODEL,
-        });
-        setClientMlStatus("ready");
-        clientMlFailedRef.current = false;
-      } catch {
-        // If one enrollment sample is unclear, keep the existing registration
-        // path as a safe fallback without changing the UI.
-      }
-
-      if (!check) {
-        setMessage("Checking this face again...");
-        check = await checkDuplicateStudentSamples({
-          studentCode,
-          files: enrollmentSamples,
-        });
-      }
+      const check = await checkDuplicateStudentSamples({
+        studentCode,
+        files: enrollmentSamples,
+      });
 
       setRegistrationDecision({
         type: check.duplicate ? "duplicate" : "new",
@@ -499,8 +380,6 @@ export default function App() {
         nearestMatch: check.nearest_match,
         threshold: check.threshold,
         sampleCount: check.sample_count,
-        clientEmbeddings,
-        clientQualityScores,
       });
       setMessage("");
     } catch (err) {
@@ -723,7 +602,7 @@ export default function App() {
     const intervalId = window.setInterval(scanAttendanceFrame, 350);
     scanAttendanceFrame();
     return () => window.clearInterval(intervalId);
-  }, [portal, cameraOpen, videoReady, streamVersion, scannerAuthenticated, clientMlStatus]);
+  }, [portal, cameraOpen, videoReady, streamVersion, scannerAuthenticated]);
 
   useEffect(() => {
     const onRoute = () => {
@@ -821,13 +700,7 @@ export default function App() {
 
       <section className="card">
         <h2>Register Profile</h2>
-        <p className="scanner-note">
-          {clientMlStatus === "ready"
-            ? "Face scanner ready. Capture 5 clear samples."
-            : clientMlStatus === "fallback"
-              ? "Face scanner is warming up. Refresh once if capture does not start."
-              : "Preparing face scanner..."}
-        </p>
+        <p className="scanner-note">Face scanner ready. Capture 5 clear samples.</p>
         <form onSubmit={onSubmit}>
           <input placeholder="ID / Roll number" value={studentCode} onChange={(e) => setStudentCode(e.target.value)} required />
           <input placeholder="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
@@ -1079,13 +952,7 @@ export default function App() {
             : "Login first, then scanner will start"}
         </span>
         {scannerAuthenticated && (
-          <small className="scanner-note inline">
-            {clientMlStatus === "ready"
-              ? "Scanner ready"
-              : clientMlStatus === "fallback"
-                ? "Scanner is warming up"
-                : "Preparing scanner..."}
-          </small>
+          <small className="scanner-note inline">Scanner ready</small>
         )}
       </div>
 
