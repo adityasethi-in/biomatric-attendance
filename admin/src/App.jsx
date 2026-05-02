@@ -1062,7 +1062,7 @@ export default function App() {
           <div>
             <strong>FacePass</strong>
             <span>{portal === "admin" ? "Admin" : "Attendance Scanner"}</span>
-            <a className="header-credit" href="https://DataCraftInsights.com" target="_blank" rel="noreferrer">
+            <a className="header-credit" href="https://www.datacraftinsights.com/" target="_blank" rel="noreferrer">
               Built by DataCraftInsights.com
             </a>
           </div>
@@ -1123,9 +1123,9 @@ export default function App() {
         {portal === "admin" ? adminPanel : scannerPanel}
         <footer className="brand-footer">
           <span>Built with care by</span>
-          <a href="https://DataCraftInsights.com" target="_blank" rel="noreferrer">
-            DataCraftInsights.com
-          </a>
+            <a href="https://www.datacraftinsights.com/" target="_blank" rel="noreferrer">
+              DataCraftInsights.com
+            </a>
         </footer>
       </main>
     </div>
