@@ -216,6 +216,10 @@ For older deployments that still need to migrate sample data, first keep:
 FACE_ENGINE_MODE=server
 FACE_ENGINE_ACTIVE_WINDOWS=07:30-09:30
 FACE_ENGINE_IDLE_UNLOAD_SECONDS=300
+FACE_MATCH_THRESHOLD=0.61
+FACE_SCAN_CANDIDATES=20
+FACE_MULTI_MATCH_MIN_HITS=2
+FACE_MATCH_MARGIN=0.035
 ```
 
 After profiles have fresh camera samples, switch to:

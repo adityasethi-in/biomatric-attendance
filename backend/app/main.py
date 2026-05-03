@@ -48,8 +48,11 @@ def _csv_env(name: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-THRESH = float(os.getenv("FACE_MATCH_THRESHOLD", "0.60"))
+THRESH = float(os.getenv("FACE_MATCH_THRESHOLD", "0.61"))
 DUPLICATE_THRESH = float(os.getenv("FACE_DUPLICATE_THRESHOLD", os.getenv("FACE_MATCH_THRESHOLD", "0.60")))
+FACE_SCAN_CANDIDATES = int(os.getenv("FACE_SCAN_CANDIDATES", "20"))
+FACE_MULTI_MATCH_MIN_HITS = int(os.getenv("FACE_MULTI_MATCH_MIN_HITS", "2"))
+FACE_MATCH_MARGIN = float(os.getenv("FACE_MATCH_MARGIN", "0.035"))
 CLIENT_FACE_MATCH_THRESHOLD = float(os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.60"))
 CLIENT_FACE_DUPLICATE_THRESHOLD = float(
     os.getenv("CLIENT_FACE_DUPLICATE_THRESHOLD", os.getenv("CLIENT_FACE_MATCH_THRESHOLD", "0.60"))
@@ -857,6 +860,109 @@ async def embeddings_from_uploads(images: list[UploadFile], min_count: int = 1, 
     return embeddings
 
 
+async def attendance_embeddings_from_uploads(images: list[UploadFile], min_count: int = 2, max_count: int = 3):
+    if len(images) < min_count:
+        raise HTTPException(status_code=400, detail=f"Capture at least {min_count} scan frames")
+
+    engine = get_face_engine()
+    embeddings = []
+    errors = []
+    for index, upload in enumerate(images[:max_count], start=1):
+        img_bytes = await upload.read()
+        img = engine.decode_image(img_bytes)
+        if img is None:
+            errors.append(f"Frame {index}: invalid image")
+            continue
+
+        if should_check_liveness() and not engine.liveness_basic(img):
+            errors.append(f"Frame {index}: liveness check failed")
+            continue
+
+        emb, det_score = engine.get_embedding(img)
+        if emb is None:
+            errors.append(f"Frame {index}: no face detected")
+            continue
+        embeddings.append((emb, det_score))
+
+    if len(embeddings) < min_count:
+        return embeddings, errors
+
+    return embeddings, []
+
+
+async def find_server_attendance_match(db: AsyncSession, embeddings: list[tuple[list[float], float]]):
+    candidate_limit = max(5, min(FACE_SCAN_CANDIDATES, 50))
+    required_hits = 1 if len(embeddings) == 1 else min(
+        max(FACE_MULTI_MATCH_MIN_HITS, 2),
+        len(embeddings),
+    )
+    candidates = {}
+    nearest_distance = None
+
+    for emb, _ in embeddings:
+        result = await db.execute(
+            text(
+                """
+                SELECT fe.student_id, s.full_name, s.person_type,
+                       s.dms_person_kind, s.dms_person_id, s.student_code,
+                       (fe.embedding <=> CAST(:emb AS vector)) AS distance
+                FROM face_embeddings fe
+                JOIN students s ON s.id = fe.student_id
+                ORDER BY fe.embedding <=> CAST(:emb AS vector)
+                LIMIT :candidate_limit
+                """
+            ),
+            {"emb": to_vector_literal(emb), "candidate_limit": candidate_limit},
+        )
+        frame_best = {}
+        for row in result.mappings().all():
+            distance = float(row["distance"])
+            nearest_distance = distance if nearest_distance is None else min(nearest_distance, distance)
+            existing = frame_best.get(row["student_id"])
+            if existing is None or distance < existing["distance"]:
+                frame_best[row["student_id"]] = {**dict(row), "distance": distance}
+
+        for row in frame_best.values():
+            student_id = row["student_id"]
+            distance = row["distance"]
+            candidate = candidates.setdefault(
+                student_id,
+                {
+                    "student_id": student_id,
+                    "full_name": row["full_name"],
+                    "person_type": row["person_type"],
+                    "dms_person_kind": row["dms_person_kind"],
+                    "dms_person_id": row["dms_person_id"],
+                    "student_code": row["student_code"],
+                    "hit_distances": [],
+                },
+            )
+            if distance <= THRESH:
+                candidate["hit_distances"].append(distance)
+
+    eligible = []
+    for candidate in candidates.values():
+        hits = len(candidate["hit_distances"])
+        if hits < required_hits:
+            continue
+        eligible.append(
+            {
+                **candidate,
+                "distance": median_distance(candidate["hit_distances"]),
+                "hits": hits,
+            }
+        )
+
+    eligible.sort(key=lambda item: (item["distance"], -item["hits"]))
+    row = eligible[0] if eligible else None
+    if row and len(eligible) > 1:
+        second = eligible[1]
+        if second["distance"] - row["distance"] < FACE_MATCH_MARGIN:
+            row = None
+
+    return row, nearest_distance
+
+
 async def find_duplicate_face(
     db: AsyncSession,
     embeddings: list[tuple[list[float], float]],
@@ -1413,6 +1519,49 @@ async def mark_attendance(
         confidence=max(0, min(100, int((1.0 - distance) * 100))),
         engine_name="server",
     )
+
+
+@app.post("/attendance/mark-samples")
+@limiter.limit("40/minute")
+async def mark_attendance_samples(
+    request: Request,
+    images: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_tenant_db),
+    operator: dict = Depends(require_operator),
+):
+    embeddings, errors = await attendance_embeddings_from_uploads(images, min_count=2, max_count=3)
+    if len(embeddings) < 2:
+        return {
+            "matched": False,
+            "reason": "unclear_face",
+            "distance": None,
+            "confidence": 0,
+            "frames_used": len(embeddings),
+            "errors": errors[:3],
+        }
+
+    row, nearest_distance = await find_server_attendance_match(db, embeddings)
+    if not row:
+        return {
+            "matched": False,
+            "reason": "unknown_face",
+            "distance": nearest_distance,
+            "confidence": 0 if nearest_distance is None else max(0, min(100, int((1.0 - nearest_distance) * 100))),
+            "frames_used": len(embeddings),
+        }
+
+    distance = float(row["distance"])
+    result = await finalize_attendance_match(
+        db,
+        operator,
+        row,
+        distance=distance,
+        confidence=max(0, min(100, int((1.0 - distance) * 100))),
+        engine_name="server",
+    )
+    result["frames_used"] = len(embeddings)
+    result["vote_hits"] = row.get("hits", len(embeddings))
+    return result
 
 
 @app.post("/attendance/mark-client")

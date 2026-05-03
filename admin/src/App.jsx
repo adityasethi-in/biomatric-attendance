@@ -18,7 +18,7 @@ import {
   getStudents,
   getSummary,
   loginAdmin,
-  markAttendanceFromFile,
+  markAttendanceFromFrames,
   registerOrganization,
   registerStudentSamples,
   setActiveOrgSlug,
@@ -35,6 +35,8 @@ const ENROLLMENT_POSES = [
   "Lower your chin slightly",
 ];
 
+const SCAN_FRAME_COUNT = 3;
+const SCAN_FRAME_DELAY_MS = 100;
 const SCAN_COOLDOWN_MS = 1200;
 const SCAN_SUCCESS_PAUSE_MS = 1800;
 
@@ -110,6 +112,10 @@ export default function App() {
   const streamRef = useRef(null);
   const scanInFlightRef = useRef(false);
   const nextScanAllowedAtRef = useRef(0);
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
 
   async function loadAll() {
     const [s, r, summaryData, statusData] = await Promise.all([
@@ -263,6 +269,18 @@ export default function App() {
     return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
   }
 
+  async function captureScanFrames() {
+    const frames = [];
+    for (let index = 0; index < SCAN_FRAME_COUNT; index += 1) {
+      const blob = await captureCurrentFrame();
+      if (blob) frames.push(blob);
+      if (index < SCAN_FRAME_COUNT - 1) {
+        await sleep(SCAN_FRAME_DELAY_MS);
+      }
+    }
+    return frames;
+  }
+
   async function scanAttendanceFrame() {
     const now = Date.now();
     if (scanInFlightRef.current || now < nextScanAllowedAtRef.current) return;
@@ -272,9 +290,9 @@ export default function App() {
     let nextPauseMs = SCAN_COOLDOWN_MS;
 
     try {
-      const blob = await captureCurrentFrame();
-      if (!blob) return;
-      const result = await markAttendanceFromFile(blob);
+      const frames = await captureScanFrames();
+      if (frames.length < 2) return;
+      const result = await markAttendanceFromFrames(frames);
 
       if (result.matched) {
         const confidence = result.confidence ?? Math.round((1 - result.distance) * 100);

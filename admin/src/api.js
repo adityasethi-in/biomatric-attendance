@@ -322,6 +322,19 @@ export async function markAttendanceFromFile(file) {
   return parseResponse(r, "Attendance failed");
 }
 
+export async function markAttendanceFromFrames(files) {
+  const form = new FormData();
+  files.forEach((file, index) => form.append("images", file, `frame-${index + 1}.jpg`));
+
+  const r = await fetch(`${API_BASE}/attendance/mark-samples`, {
+    method: "POST",
+    headers: scannerHeaders(),
+    body: form,
+  });
+
+  return parseResponse(r, "Attendance failed");
+}
+
 export async function markAttendanceWithEmbedding({ embedding, embeddings, qualityScore, qualityScores, model }) {
   const r = await fetch(`${API_BASE}/attendance/mark-client`, {
     method: "POST",
