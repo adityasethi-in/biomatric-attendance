@@ -165,6 +165,20 @@ export async function warmupScanner() {
   return parseResponse(r, "Scanner is not ready");
 }
 
+export async function overrideScanner({ organizationSlug, username, password }) {
+  const form = new FormData();
+  form.append("organization_slug", organizationSlug);
+  form.append("username", username);
+  form.append("password", password);
+
+  const r = await fetch(`${API_BASE}/scanner/override`, {
+    method: "POST",
+    body: form,
+  });
+
+  return parseResponse(r, "Scanner unlock failed");
+}
+
 export async function registerOrganization(data) {
   const form = new FormData();
   Object.entries(data).forEach(([key, value]) => form.append(key, value));

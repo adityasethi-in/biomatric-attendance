@@ -587,6 +587,14 @@ tr:hover td {
   box-shadow: var(--shadow-soft);
 }
 
+.override-form {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(15, 118, 110, 0.35);
+  border-radius: 16px;
+  background: rgba(215, 244, 238, 0.45);
+}
+
 .field-label {
   display: block;
   margin-top: 12px;

@@ -20,6 +20,7 @@ import {
   getSummary,
   loginAdmin,
   markAttendanceFromFrames,
+  overrideScanner,
   registerOrganization,
   registerStudentSamples,
   requestPasswordReset,
@@ -44,6 +45,7 @@ const SCAN_SUCCESS_PAUSE_MS = 1800;
 
 const DEFAULT_ORG_SLUG = "delight-model-school";
 const DEFAULT_ADMIN_EMAIL = "admin@delightmodelschool.in";
+const SCANNER_CLOSED_TEXT = "Scanner is available 7:00 AM to 11:00 AM. Admin can unlock for 30 minutes.";
 const emptyOrgRegistration = {
   organization_name: "",
   org_type: "school",
@@ -76,6 +78,11 @@ export default function App() {
   const [scannerUsername, setScannerUsername] = useState(sessionStorage.getItem("scanner_username") || DEFAULT_ADMIN_EMAIL);
   const [scannerPassword, setScannerPassword] = useState("");
   const [scannerOrgName, setScannerOrgName] = useState(sessionStorage.getItem("scanner_org_name") || "Delight Model School");
+  const [scannerOverrideNeeded, setScannerOverrideNeeded] = useState(false);
+  const [scannerOverridePassword, setScannerOverridePassword] = useState("");
+  const [scannerOverrideUntil, setScannerOverrideUntil] = useState("");
+  const [adminOverridePassword, setAdminOverridePassword] = useState("");
+  const [adminOverrideUntil, setAdminOverrideUntil] = useState("");
   const [authMode, setAuthMode] = useState("login");
   const [resetEmail, setResetEmail] = useState(DEFAULT_ADMIN_EMAIL);
   const [resetToken, setResetToken] = useState("");
@@ -343,6 +350,8 @@ export default function App() {
       }
       if (err.status === 503) {
         closeCamera();
+        setScannerAuthenticated(false);
+        setScannerOverrideNeeded(true);
         setScannerStatus(err.message);
         setMessage(err.message);
         return;
@@ -636,18 +645,78 @@ export default function App() {
       });
       setScannerSession(result);
       setScannerOrgName(result.organization.name);
-      setScannerPassword("");
       setScannerStatus("Preparing scanner...");
       try {
         await warmupScanner();
       } catch (warmupError) {
+        if (warmupError.status === 503) {
+          setScannerOverrideNeeded(true);
+          setScannerOverridePassword(scannerPassword);
+          setScannerStatus(warmupError.message || SCANNER_CLOSED_TEXT);
+          setMessage(warmupError.message || SCANNER_CLOSED_TEXT);
+          return;
+        }
         clearScannerSession();
         setScannerAuthenticated(false);
         setMessage(warmupError.message);
         return;
       }
+      setScannerOverrideNeeded(false);
+      setScannerOverridePassword("");
+      setScannerPassword("");
       setScannerAuthenticated(true);
       setScannerStatus("Login successful. Starting camera...");
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function unlockScannerForAttendance(e) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+    try {
+      const result = await overrideScanner({
+        organizationSlug: selectedOrgSlug,
+        username: scannerUsername,
+        password: scannerOverridePassword || scannerPassword,
+      });
+      if (result.token) {
+        setScannerSession(result);
+        setScannerOrgName(result.organization.name);
+      }
+      setScannerOverrideUntil(result.override_until || "");
+      setScannerOverrideNeeded(false);
+      setScannerPassword("");
+      setScannerOverridePassword("");
+      await warmupScanner();
+      setScannerAuthenticated(true);
+      setScannerStatus(`Scanner unlocked for ${result.override_minutes || 30} minutes.`);
+      setMessage(`Scanner unlocked until ${new Date(result.override_until).toLocaleTimeString()}.`);
+    } catch (err) {
+      setMessage(err.message);
+      setScannerStatus(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function unlockScannerForAdmin(e) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+    try {
+      const result = await overrideScanner({
+        organizationSlug: selectedOrgSlug,
+        username: adminUsername,
+        password: adminOverridePassword,
+      });
+      if (result.token) setAdminSession(result);
+      setAdminOverrideUntil(result.override_until || "");
+      setAdminOverridePassword("");
+      setMessage(`Face scanner unlocked until ${new Date(result.override_until).toLocaleTimeString()}.`);
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -658,6 +727,8 @@ export default function App() {
   function logoutScanner() {
     clearScannerSession();
     setScannerAuthenticated(false);
+    setScannerOverrideNeeded(false);
+    setScannerOverridePassword("");
     closeCamera();
     setScannerStatus("Login required before scanning.");
   }
@@ -807,7 +878,18 @@ export default function App() {
 
       <section className="card">
         <h2>Register Profile</h2>
-        <p className="scanner-note">Face scanner ready. Capture 5 clear samples.</p>
+        <p className="scanner-note">{SCANNER_CLOSED_TEXT}</p>
+        <form className="override-form" onSubmit={unlockScannerForAdmin}>
+          <input
+            type="password"
+            placeholder="Admin password to unlock face scanner"
+            value={adminOverridePassword}
+            onChange={(e) => setAdminOverridePassword(e.target.value)}
+            required
+          />
+          <button disabled={loading} type="submit">{loading ? "Unlocking..." : "Unlock Face Scanner for 30 Min"}</button>
+          {adminOverrideUntil && <p className="hint-text">Unlocked until {new Date(adminOverrideUntil).toLocaleTimeString()}.</p>}
+        </form>
         <form onSubmit={onSubmit}>
           <input placeholder="ID / Roll number" value={studentCode} onChange={(e) => setStudentCode(e.target.value)} required />
           <input placeholder="Full name" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
@@ -1127,33 +1209,49 @@ export default function App() {
       </div>
 
       {!scannerAuthenticated ? (
-        <form onSubmit={onScannerLogin}>
-          <label className="field-label">Company / School</label>
-          <select value={selectedOrgSlug} onChange={(e) => onOrganizationChange(e.target.value)}>
-            {organizations.map((org) => (
-              <option key={org.slug} value={org.slug}>
-                {org.name}{org.is_free ? " (Free)" : ""}
-              </option>
-            ))}
-          </select>
-          <input
-            type="email"
-            placeholder="User email"
-            value={scannerUsername}
-            onChange={(e) => setScannerUsername(e.target.value.toLowerCase())}
-            autoFocus
-          />
-          <input
-            type="password"
-            placeholder="User password"
-            value={scannerPassword}
-            onChange={(e) => setScannerPassword(e.target.value)}
-          />
-          <button disabled={loading} type="submit">
-            {loading ? "Logging in..." : "Login & Start Scanner"}
-          </button>
-          <p className="hint-text">Use the scanner/admin credentials configured for this organization.</p>
-        </form>
+        <>
+          <form onSubmit={onScannerLogin}>
+            <label className="field-label">Company / School</label>
+            <select value={selectedOrgSlug} onChange={(e) => onOrganizationChange(e.target.value)}>
+              {organizations.map((org) => (
+                <option key={org.slug} value={org.slug}>
+                  {org.name}{org.is_free ? " (Free)" : ""}
+                </option>
+              ))}
+            </select>
+            <input
+              type="email"
+              placeholder="User email"
+              value={scannerUsername}
+              onChange={(e) => setScannerUsername(e.target.value.toLowerCase())}
+              autoFocus
+            />
+            <input
+              type="password"
+              placeholder="User password"
+              value={scannerPassword}
+              onChange={(e) => setScannerPassword(e.target.value)}
+            />
+            <button disabled={loading} type="submit">
+              {loading ? "Logging in..." : "Login & Start Scanner"}
+            </button>
+            <p className="hint-text">Use the scanner/admin credentials configured for this organization.</p>
+          </form>
+          {scannerOverrideNeeded && (
+            <form className="override-form" onSubmit={unlockScannerForAttendance}>
+              <div className="scanner-note">{SCANNER_CLOSED_TEXT}</div>
+              <input
+                type="password"
+                placeholder="Admin password"
+                value={scannerOverridePassword}
+                onChange={(e) => setScannerOverridePassword(e.target.value)}
+                required
+              />
+              <button disabled={loading} type="submit">{loading ? "Unlocking..." : "Unlock Scanner for 30 Min"}</button>
+              {scannerOverrideUntil && <p className="hint-text">Unlocked until {new Date(scannerOverrideUntil).toLocaleTimeString()}.</p>}
+            </form>
+          )}
+        </>
       ) : !cameraOpen ? (
         <>
           <div className="org-banner compact">

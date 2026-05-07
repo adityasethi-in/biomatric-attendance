@@ -73,6 +73,7 @@ CLIENT_FACE_MATCH_MARGIN = float(os.getenv("CLIENT_FACE_MATCH_MARGIN", "0.035"))
 FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "server").lower()
 FACE_ENGINE_ACTIVE_WINDOWS = os.getenv("FACE_ENGINE_ACTIVE_WINDOWS", "").strip()
 FACE_ENGINE_IDLE_UNLOAD_SECONDS = int(os.getenv("FACE_ENGINE_IDLE_UNLOAD_SECONDS", "300"))
+SCANNER_OVERRIDE_MINUTES = int(os.getenv("SCANNER_OVERRIDE_MINUTES", "30"))
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 VALID_PERSON_TYPES = {"student", "staff", "teacher"}
@@ -171,6 +172,9 @@ CREATE TABLE IF NOT EXISTS organizations (
   payment_reference VARCHAR(128),
   dms_base_url VARCHAR(255),
   dms_webhook_secret VARCHAR(255),
+  scanner_override_until TIMESTAMPTZ,
+  scanner_override_by_admin_id INT,
+  scanner_override_created_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -219,6 +223,7 @@ def rate_limit_key(request: Request) -> str:
 limiter = Limiter(key_func=rate_limit_key, default_limits=["120/minute"])
 _face_engine = None
 _face_engine_last_used_at = 0.0
+_face_engine_override_until: datetime | None = None
 
 
 def _app_zone():
@@ -257,7 +262,7 @@ def _time_in_window(current: dt_time, start: dt_time, end: dt_time) -> bool:
     return current >= start or current <= end
 
 
-def face_engine_allowed_now() -> bool:
+def face_engine_in_schedule() -> bool:
     windows = _face_engine_windows()
     if not windows:
         return True
@@ -265,11 +270,73 @@ def face_engine_allowed_now() -> bool:
     return any(_time_in_window(current, start, end) for start, end in windows)
 
 
+def _format_human_time(value: dt_time) -> str:
+    return datetime.combine(datetime.today(), value).strftime("%I:%M %p").lstrip("0")
+
+
 def face_engine_schedule_label() -> str:
     windows = _face_engine_windows()
     if not windows:
         return "all day"
     return ", ".join(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in windows)
+
+
+def face_engine_schedule_human() -> str:
+    windows = _face_engine_windows()
+    if not windows:
+        return "all day"
+    return ", ".join(f"{_format_human_time(start)} to {_format_human_time(end)}" for start, end in windows)
+
+
+def _coerce_utc_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def scanner_override_active(access_context: dict | None = None) -> bool:
+    override_until = _coerce_utc_datetime((access_context or {}).get("scanner_override_until"))
+    return bool(override_until and override_until > datetime.now(timezone.utc))
+
+
+def face_engine_allowed_now(access_context: dict | None = None) -> bool:
+    return face_engine_in_schedule() or scanner_override_active(access_context)
+
+
+def face_engine_closed_message() -> str:
+    return (
+        f"Scanner is available {face_engine_schedule_human()}. "
+        f"Admin can unlock for {SCANNER_OVERRIDE_MINUTES} minutes."
+    )
+
+
+def remember_active_override(access_context: dict | None = None):
+    global _face_engine_override_until
+    override_until = _coerce_utc_datetime((access_context or {}).get("scanner_override_until"))
+    if override_until and override_until > datetime.now(timezone.utc):
+        if not _face_engine_override_until or override_until > _face_engine_override_until:
+            _face_engine_override_until = override_until
+
+
+def face_engine_globally_allowed() -> bool:
+    global _face_engine_override_until
+    if face_engine_in_schedule():
+        return True
+    if _face_engine_override_until and _face_engine_override_until > datetime.now(timezone.utc):
+        return True
+    _face_engine_override_until = None
+    return False
 
 
 def password_reset_email_ready() -> bool:
@@ -335,7 +402,7 @@ def unload_face_engine(reason: str = "idle"):
     LOGGER.info("Face scanner released (%s)", reason)
 
 
-def get_face_engine():
+def get_face_engine(access_context: dict | None = None):
     """Start the scanner engine only for the image upload flow."""
     global _face_engine, _face_engine_last_used_at
     if FACE_ENGINE_MODE in {"client", "off", "disabled", "false", "0"}:
@@ -343,12 +410,13 @@ def get_face_engine():
             status_code=503,
             detail="Face scanner is not ready. Please refresh and try again.",
         )
-    if not face_engine_allowed_now():
+    if not face_engine_allowed_now(access_context):
         unload_face_engine("outside-window")
         raise HTTPException(
             status_code=503,
-            detail=f"Scanner is available during attendance time ({face_engine_schedule_label()}).",
+            detail=face_engine_closed_message(),
         )
+    remember_active_override(access_context)
 
     if _face_engine is None:
         from .face_engine import FaceEngine
@@ -365,7 +433,7 @@ async def face_engine_reaper():
         if _face_engine is None:
             continue
         idle_for = time.monotonic() - _face_engine_last_used_at
-        if not face_engine_allowed_now():
+        if not face_engine_globally_allowed():
             unload_face_engine("outside-window")
         elif FACE_ENGINE_IDLE_UNLOAD_SECONDS > 0 and idle_for >= FACE_ENGINE_IDLE_UNLOAD_SECONDS:
             unload_face_engine("idle")
@@ -388,6 +456,9 @@ async def lifespan(app: FastAPI):
         for stmt in (
             "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS dms_base_url VARCHAR(255)",
             "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS dms_webhook_secret VARCHAR(255)",
+            "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS scanner_override_until TIMESTAMPTZ",
+            "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS scanner_override_by_admin_id INT",
+            "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS scanner_override_created_at TIMESTAMPTZ",
             "ALTER TABLE students ADD COLUMN IF NOT EXISTS dms_person_kind VARCHAR(16)",
             "ALTER TABLE students ADD COLUMN IF NOT EXISTS dms_person_id UUID",
             "CREATE INDEX IF NOT EXISTS idx_students_dms_person ON students(dms_person_kind, dms_person_id)",
@@ -550,7 +621,9 @@ async def get_organization_by_slug(db: AsyncSession, slug: str):
             """
             SELECT id, name, slug, database_name, status, is_free, seats,
                    price_per_user_per_day, billing_days, advance_amount,
-                   dms_base_url, dms_webhook_secret
+                   dms_base_url, dms_webhook_secret,
+                   scanner_override_until, scanner_override_by_admin_id,
+                   scanner_override_created_at
             FROM organizations
             WHERE slug = :slug
             """
@@ -614,9 +687,13 @@ async def _resolve_admin_row(db: AsyncSession, slug: str, username: str):
     result = await db.execute(
         text(
             """
-            SELECT oa.id, oa.username, oa.password_hash,
-                   o.id AS organization_id, o.slug, o.status,
-                   o.dms_base_url, o.dms_webhook_secret
+            SELECT oa.id, oa.username, oa.password_hash, oa.full_name,
+                   o.id AS organization_id, o.name AS organization_name,
+                   o.slug, o.status, o.is_free, o.seats, o.advance_amount,
+                   o.dms_base_url, o.dms_webhook_secret,
+                   (o.dms_base_url IS NOT NULL AND o.dms_webhook_secret IS NOT NULL) AS dms_linked,
+                   o.scanner_override_until, o.scanner_override_by_admin_id,
+                   o.scanner_override_created_at
             FROM organization_admins oa
             JOIN organizations o ON o.id = oa.organization_id
             WHERE o.slug = :slug AND oa.username = :username
@@ -679,9 +756,80 @@ async def root():
 
 @app.post("/scanner/warmup")
 @limiter.limit("20/minute")
-async def warmup_scanner(request: Request, _operator: dict = Depends(require_operator)):
-    get_face_engine()
-    return {"ok": True, "scanner": "ready", "schedule": face_engine_schedule_label()}
+async def warmup_scanner(request: Request, operator: dict = Depends(require_operator)):
+    get_face_engine(operator)
+    return {
+        "ok": True,
+        "scanner": "ready",
+        "schedule": face_engine_schedule_label(),
+        "schedule_human": face_engine_schedule_human(),
+        "override_until": str(operator.get("scanner_override_until") or ""),
+    }
+
+
+@app.post("/scanner/override")
+@limiter.limit("5/minute")
+async def scanner_override(
+    request: Request,
+    organization_slug: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    normalized_username = username.strip().lower()
+    async with SessionLocal() as db:
+        row = await _resolve_admin_row(db, organization_slug, normalized_username)
+        if not row or row["status"] != "active":
+            raise HTTPException(status_code=401, detail="Invalid admin login")
+        ok, needs_rehash = verify_password(password, row["password_hash"])
+        if not ok:
+            raise HTTPException(status_code=401, detail="Invalid admin login")
+        password_hash = row["password_hash"]
+        if needs_rehash:
+            password_hash = hash_password(password)
+            await db.execute(
+                text("UPDATE organization_admins SET password_hash = :h WHERE id = :id"),
+                {"h": password_hash, "id": row["id"]},
+            )
+
+        override_until = datetime.now(timezone.utc) + timedelta(minutes=SCANNER_OVERRIDE_MINUTES)
+        await db.execute(
+            text(
+                """
+                UPDATE organizations
+                SET scanner_override_until = :override_until,
+                    scanner_override_by_admin_id = :admin_id,
+                    scanner_override_created_at = now()
+                WHERE id = :organization_id
+                """
+            ),
+            {
+                "override_until": override_until,
+                "admin_id": row["id"],
+                "organization_id": row["organization_id"],
+            },
+        )
+        await db.commit()
+
+    remember_active_override({"scanner_override_until": override_until})
+    return {
+        "ok": True,
+        "scanner": "unlocked",
+        "override_minutes": SCANNER_OVERRIDE_MINUTES,
+        "override_until": override_until.isoformat(),
+        "schedule": face_engine_schedule_label(),
+        "schedule_human": face_engine_schedule_human(),
+        "token": admin_token(row["slug"], row["username"], password_hash),
+        "organization": {
+            "id": row["organization_id"],
+            "name": row["organization_name"],
+            "slug": row["slug"],
+            "is_free": row["is_free"],
+            "seats": row["seats"],
+            "advance_amount": float(row["advance_amount"]),
+            "dms_linked": bool(row["dms_linked"]),
+        },
+        "admin": {"username": row["username"], "full_name": row["full_name"]},
+    }
 
 
 @app.get("/organizations")
@@ -1075,8 +1223,8 @@ def _coerce_uuid(value: str | None):
         raise HTTPException(status_code=400, detail="dms_person_id must be a valid UUID")
 
 
-async def embedding_from_upload(upload: UploadFile):
-    engine = get_face_engine()
+async def embedding_from_upload(upload: UploadFile, access_context: dict | None = None):
+    engine = get_face_engine(access_context)
     img_bytes = await read_image_upload(upload)
     img = engine.decode_image(img_bytes)
     if img is None:
@@ -1089,13 +1237,18 @@ async def embedding_from_upload(upload: UploadFile):
     return emb, det_score, None
 
 
-async def embeddings_from_uploads(images: list[UploadFile], min_count: int = 1, max_count: int = 10):
+async def embeddings_from_uploads(
+    images: list[UploadFile],
+    min_count: int = 1,
+    max_count: int = 10,
+    access_context: dict | None = None,
+):
     if len(images) < min_count:
         raise HTTPException(status_code=400, detail=f"Capture at least {min_count} face samples")
 
     embeddings = []
     for index, upload in enumerate(images[:max_count], start=1):
-        emb, det_score, error = await embedding_from_upload(upload)
+        emb, det_score, error = await embedding_from_upload(upload, access_context)
         if error:
             raise HTTPException(status_code=422, detail=f"Sample {index}: {error}")
         embeddings.append((emb, det_score))
@@ -1103,11 +1256,16 @@ async def embeddings_from_uploads(images: list[UploadFile], min_count: int = 1, 
     return embeddings
 
 
-async def attendance_embeddings_from_uploads(images: list[UploadFile], min_count: int = 2, max_count: int = 3):
+async def attendance_embeddings_from_uploads(
+    images: list[UploadFile],
+    min_count: int = 2,
+    max_count: int = 3,
+    access_context: dict | None = None,
+):
     if len(images) < min_count:
         raise HTTPException(status_code=400, detail=f"Capture at least {min_count} scan frames")
 
-    engine = get_face_engine()
+    engine = get_face_engine(access_context)
     embeddings = []
     errors = []
     for index, upload in enumerate(images[:max_count], start=1):
@@ -1423,7 +1581,7 @@ async def register_student_samples(
         raise HTTPException(status_code=400, detail="dms_person_kind must be student or teacher")
     dms_uuid = _coerce_uuid(dms_person_id) if dms_kind else None
 
-    embeddings = await embeddings_from_uploads(images, min_count=5)
+    embeddings = await embeddings_from_uploads(images, min_count=5, access_context=_admin)
     duplicate = await ensure_not_duplicate_face(db, embeddings, student_code, allow_duplicate)
 
     s, re_enrolled = await _upsert_student(
@@ -1474,7 +1632,7 @@ async def register_student(
         raise HTTPException(status_code=400, detail="dms_person_kind must be student or teacher")
     dms_uuid = _coerce_uuid(dms_person_id) if dms_kind else None
 
-    emb, det_score, error = await embedding_from_upload(image)
+    emb, det_score, error = await embedding_from_upload(image, _admin)
     if error:
         raise HTTPException(status_code=422, detail=error)
     await ensure_not_duplicate_face(db, [(emb, det_score)], student_code, allow_duplicate)
@@ -1509,7 +1667,7 @@ async def check_duplicate_student(
     db: AsyncSession = Depends(get_tenant_db),
     _admin: dict = Depends(require_admin),
 ):
-    embeddings = await embeddings_from_uploads(images, min_count=1)
+    embeddings = await embeddings_from_uploads(images, min_count=1, access_context=_admin)
     match = await find_duplicate_face(db, embeddings, exclude_student_code=student_code)
     duplicate = bool(match and match["distance"] <= DUPLICATE_THRESH)
 
@@ -1717,7 +1875,7 @@ async def mark_attendance(
     db: AsyncSession = Depends(get_tenant_db),
     operator: dict = Depends(require_operator),
 ):
-    engine = get_face_engine()
+    engine = get_face_engine(operator)
     img_bytes = await read_image_upload(image)
     img = engine.decode_image(img_bytes)
     if img is None:
@@ -1772,7 +1930,12 @@ async def mark_attendance_samples(
     db: AsyncSession = Depends(get_tenant_db),
     operator: dict = Depends(require_operator),
 ):
-    embeddings, errors = await attendance_embeddings_from_uploads(images, min_count=2, max_count=3)
+    embeddings, errors = await attendance_embeddings_from_uploads(
+        images,
+        min_count=2,
+        max_count=3,
+        access_context=operator,
+    )
     if len(embeddings) < 2:
         return {
             "matched": False,
