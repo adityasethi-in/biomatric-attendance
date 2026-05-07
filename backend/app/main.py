@@ -15,6 +15,7 @@ import math
 import httpx
 from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -36,7 +37,7 @@ from .dms_link import (
     health_check as dms_health_check,
     outbox_worker,
 )
-from .security import admin_token, admin_token_secret, hash_password, verify_password
+from .security import admin_token, admin_token_secret, hash_password, verify_admin_token, verify_password
 
 
 LOGGER = logging.getLogger("biomatric")
@@ -69,13 +70,16 @@ FACE_ENGINE_IDLE_UNLOAD_SECONDS = int(os.getenv("FACE_ENGINE_IDLE_UNLOAD_SECONDS
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 VALID_PERSON_TYPES = {"student", "staff", "teacher"}
+ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 DEFAULT_ORG_NAME = os.getenv("DEFAULT_FREE_ORG_NAME", "Delight Model School")
 DEFAULT_ORG_SLUG = os.getenv("DEFAULT_FREE_ORG_SLUG", "delight-model-school")
 DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "2500000"))
 PRICE_PER_USER_PER_DAY = Decimal(os.getenv("PRICE_PER_USER_PER_DAY", "3"))
 DEFAULT_BILLING_DAYS = int(os.getenv("DEFAULT_BILLING_DAYS", "30"))
 ALLOWED_ORIGINS = _csv_env("ALLOWED_ORIGINS") or ["http://localhost:7200"]
+TRUSTED_HOSTS = _csv_env("TRUSTED_HOSTS")
 DEV_MODE = os.getenv("BIOMATRIC_DEV_MODE", "").lower() in {"1", "true", "yes"}
 
 DMS_DEFAULT_BASE_URL = os.getenv("DMS_BASE_URL", "").strip() or None
@@ -239,6 +243,17 @@ def face_engine_schedule_label() -> str:
     return ", ".join(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in windows)
 
 
+async def read_image_upload(upload: UploadFile) -> bytes:
+    content_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="Only JPG, PNG, or WebP images are allowed")
+
+    data = await upload.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Image is too large. Use a smaller camera frame.")
+    return data
+
+
 def unload_face_engine(reason: str = "idle"):
     global _face_engine, _face_engine_last_used_at
     if _face_engine is None:
@@ -393,6 +408,9 @@ app = FastAPI(title="Face Recognition Attendance System", version="1.1.0", lifes
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+if TRUSTED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -401,6 +419,15 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 
 async def get_db():
@@ -514,9 +541,7 @@ async def require_admin(
         row = await _resolve_admin_row(db, slug, x_admin_username)
         if not row or row["status"] != "active":
             raise HTTPException(status_code=401, detail="Invalid admin login")
-        expected = admin_token(row["slug"], row["username"], row["password_hash"])
-        import hmac as _hmac
-        if not _hmac.compare_digest(expected, x_admin_token):
+        if not verify_admin_token(row["slug"], row["username"], row["password_hash"], x_admin_token):
             raise HTTPException(status_code=401, detail="Invalid admin login")
         return dict(row)
 
@@ -538,9 +563,7 @@ async def require_operator(
         row = await _resolve_admin_row(db, slug, username)
         if not row or row["status"] != "active":
             raise HTTPException(status_code=401, detail="Invalid attendance login")
-        expected = admin_token(row["slug"], row["username"], row["password_hash"])
-        import hmac as _hmac
-        if not _hmac.compare_digest(expected, token):
+        if not verify_admin_token(row["slug"], row["username"], row["password_hash"], token):
             raise HTTPException(status_code=401, detail="Invalid attendance login")
         return dict(row)
 
@@ -834,7 +857,7 @@ def _coerce_uuid(value: str | None):
 
 async def embedding_from_upload(upload: UploadFile):
     engine = get_face_engine()
-    img_bytes = await upload.read()
+    img_bytes = await read_image_upload(upload)
     img = engine.decode_image(img_bytes)
     if img is None:
         return None, None, "Invalid image"
@@ -868,7 +891,7 @@ async def attendance_embeddings_from_uploads(images: list[UploadFile], min_count
     embeddings = []
     errors = []
     for index, upload in enumerate(images[:max_count], start=1):
-        img_bytes = await upload.read()
+        img_bytes = await read_image_upload(upload)
         img = engine.decode_image(img_bytes)
         if img is None:
             errors.append(f"Frame {index}: invalid image")
@@ -1475,7 +1498,7 @@ async def mark_attendance(
     operator: dict = Depends(require_operator),
 ):
     engine = get_face_engine()
-    img_bytes = await image.read()
+    img_bytes = await read_image_upload(image)
     img = engine.decode_image(img_bytes)
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image")

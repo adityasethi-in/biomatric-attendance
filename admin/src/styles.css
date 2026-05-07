@@ -1,27 +1,27 @@
 :root {
-  --bg-deep: #0b1220;
-  --bg-canvas: #f6f8fc;
+  --bg-deep: #06111f;
+  --bg-canvas: #f4f7fb;
   --surface: #ffffff;
-  --surface-soft: #f8fafc;
-  --surface-muted: #eef2f7;
-  --border: #e2e8f3;
+  --surface-soft: #f8fbff;
+  --surface-muted: #edf3f8;
+  --border: #dde7f2;
   --border-strong: #cbd5e1;
-  --text: #0f172a;
-  --text-muted: #475569;
-  --text-soft: #64748b;
-  --primary: #2563eb;
-  --primary-strong: #1d4ed8;
-  --primary-soft: #dbeafe;
-  --accent: #16a085;
-  --success: #16a34a;
-  --warning: #d97706;
-  --danger: #dc2626;
-  --shadow-card: 0 8px 24px rgba(15, 23, 42, 0.08);
-  --shadow-soft: 0 2px 8px rgba(15, 23, 42, 0.05);
-  --radius-card: 18px;
-  --radius-control: 12px;
+  --text: #111827;
+  --text-muted: #4b5f73;
+  --text-soft: #708195;
+  --primary: #0f766e;
+  --primary-strong: #115e59;
+  --primary-soft: #d7f4ee;
+  --accent: #c9892b;
+  --success: #159947;
+  --warning: #b7791f;
+  --danger: #c24135;
+  --shadow-card: 0 18px 45px rgba(15, 23, 42, 0.10);
+  --shadow-soft: 0 8px 22px rgba(15, 23, 42, 0.07);
+  --radius-card: 22px;
+  --radius-control: 14px;
   --radius-pill: 999px;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
   color: var(--text);
 }
 
@@ -33,6 +33,8 @@ body {
   margin: 0;
   background: var(--bg-deep);
   color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
 code {
@@ -45,22 +47,25 @@ code {
 
 .app-shell {
   min-height: 100vh;
-  padding: 24px 18px 40px;
+  padding: 26px 18px 42px;
   background:
-    radial-gradient(circle at top left, rgba(37, 99, 235, 0.18), transparent 38%),
-    radial-gradient(circle at bottom right, rgba(22, 160, 133, 0.18), transparent 42%),
-    linear-gradient(160deg, #0b1220, #111827 48%, #0b1220);
+    radial-gradient(circle at 16% 6%, rgba(20, 184, 166, 0.24), transparent 30%),
+    radial-gradient(circle at 82% 18%, rgba(201, 137, 43, 0.20), transparent 26%),
+    linear-gradient(135deg, rgba(255,255,255,0.035) 25%, transparent 25%) 0 0 / 22px 22px,
+    linear-gradient(160deg, #06111f, #111c2c 48%, #071523);
 }
 
 .phone-frame {
   width: min(100%, 480px);
   min-height: calc(100vh - 64px);
   margin: 0 auto;
-  padding: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  border-radius: 28px;
-  background: var(--bg-canvas);
-  box-shadow: 0 32px 80px rgba(2, 6, 23, 0.55);
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 34px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.96), rgba(244,247,251,0.98)),
+    var(--bg-canvas);
+  box-shadow: 0 34px 90px rgba(2, 6, 23, 0.58);
 }
 
 .app-header {
@@ -68,11 +73,13 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
-  border-radius: 18px;
-  background: linear-gradient(135deg, #0f172a, #1e293b);
+  padding: 16px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(20, 184, 166, 0.28), transparent 34%),
+    linear-gradient(135deg, #07111f, #132238 58%, #1a2f3c);
   color: #fff;
-  box-shadow: var(--shadow-soft);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.24);
 }
 
 .app-header strong {
@@ -84,7 +91,7 @@ code {
 .app-header span {
   display: block;
   margin-top: 2px;
-  color: #94a3b8;
+  color: #b8c4d2;
   font-size: 12px;
 }
 
@@ -92,10 +99,10 @@ code {
   display: inline-flex;
   margin-top: 7px;
   padding: 4px 9px;
-  border: 1px solid rgba(148, 163, 184, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.08);
-  color: #dbeafe;
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8f7f3;
   font-size: 11px;
   font-weight: 800;
   line-height: 1;
@@ -115,12 +122,13 @@ code {
 
 .app-message {
   margin: 14px 0 0;
-  padding: 11px 14px;
-  border: 1px solid #fde68a;
-  border-radius: 14px;
-  background: #fef9c3;
-  color: #713f12;
+  padding: 12px 14px;
+  border: 1px solid #f0d28d;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fff8df, #fff3c4);
+  color: #6b4612;
   font-size: 14px;
+  box-shadow: var(--shadow-soft);
 }
 
 .error-text {
@@ -129,22 +137,28 @@ code {
 
 .card,
 .scanner-card {
-  margin-top: 14px;
-  padding: 16px;
+  margin-top: 15px;
+  padding: 17px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.88)),
+    var(--surface);
   box-shadow: var(--shadow-card);
 }
 
 .scanner-card {
   overflow: hidden;
+  border-color: rgba(15, 118, 110, 0.28);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(20, 184, 166, 0.12), transparent 38%),
+    linear-gradient(180deg, #ffffff, #f8fbff);
 }
 
 .scanner-title h1 {
   margin: 0;
-  font-size: 26px;
-  font-weight: 700;
+  font-size: 28px;
+  font-weight: 850;
   line-height: 1.05;
   letter-spacing: -0.02em;
 }
@@ -159,7 +173,7 @@ code {
 h2 {
   margin: 0 0 10px;
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 850;
   letter-spacing: -0.01em;
 }
 
@@ -170,33 +184,36 @@ select {
   min-height: 46px;
   margin-top: 8px;
   padding: 11px 13px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   font: inherit;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease, background 0.15s ease;
 }
 
 input:focus,
-select:focus {
+select:focus,
+button:focus-visible,
+a:focus-visible {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.18);
 }
 
 button {
   background: linear-gradient(135deg, var(--primary), var(--primary-strong));
   color: white;
   border: none;
-  font-weight: 700;
+  font-weight: 850;
   letter-spacing: 0.01em;
   cursor: pointer;
-  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.28);
+  box-shadow: 0 10px 20px rgba(15, 118, 110, 0.22);
 }
 
 button:hover:not(:disabled) {
-  filter: brightness(1.05);
+  filter: brightness(1.04);
+  transform: translateY(-1px);
 }
 
 button:active:not(:disabled) {
@@ -210,7 +227,7 @@ button:disabled {
 }
 
 .ghost-button {
-  background: var(--surface-muted);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text);
   border: 1px solid var(--border);
   box-shadow: none;
@@ -221,8 +238,8 @@ button:disabled {
 }
 
 .danger-button {
-  background: linear-gradient(135deg, #ef4444, #dc2626);
-  box-shadow: 0 6px 14px rgba(220, 38, 38, 0.28);
+  background: linear-gradient(135deg, #d84a3d, #b92f28);
+  box-shadow: 0 10px 20px rgba(194, 65, 53, 0.22);
 }
 
 .full-width {
@@ -234,8 +251,8 @@ button:disabled {
   min-height: 290px;
   max-height: 60vh;
   margin-top: 10px;
-  border-radius: 16px;
-  background: #020617;
+  border-radius: 18px;
+  background: radial-gradient(circle at center, #162033, #020617 70%);
   object-fit: cover;
   transform: scaleX(-1);
 }
@@ -247,11 +264,42 @@ button:disabled {
 .scan-stage {
   position: relative;
   margin-top: 12px;
-  border: 4px solid #0f172a;
-  border-radius: 22px;
+  border: 4px solid #0b1726;
+  border-radius: 26px;
   overflow: hidden;
   background: #020617;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 20px 50px rgba(2, 6, 23, 0.22);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.scan-stage::before {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  z-index: 1;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 18px;
+  box-shadow: 0 0 0 999px rgba(2, 6, 23, 0.08);
+}
+
+.scan-stage::after {
+  content: "";
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 18%;
+  z-index: 1;
+  height: 2px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.9), transparent);
+  box-shadow: 0 0 22px rgba(45, 212, 191, 0.75);
+  animation: scanLine 2.3s ease-in-out infinite;
+}
+
+@keyframes scanLine {
+  0%, 100% { transform: translateY(0); opacity: 0.35; }
+  50% { transform: translateY(190px); opacity: 0.95; }
 }
 
 .scan-stage .camera-preview {
@@ -279,17 +327,18 @@ button:disabled {
   position: absolute;
   left: 14px;
   right: 14px;
-  bottom: 14px;
+  bottom: 16px;
+  z-index: 2;
   pointer-events: none;
   padding: 13px;
-  border-radius: 14px;
+  border-radius: 16px;
   text-align: center;
   font-size: 18px;
   font-weight: 800;
   letter-spacing: 0.3px;
   color: #fff;
   animation: feedbackPop 0.2s ease-out;
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(8px);
 }
 
 .recognition-overlay.success {
