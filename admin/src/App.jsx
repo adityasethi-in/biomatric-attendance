@@ -4,6 +4,7 @@ import {
   clearAdminSession,
   clearAttendance,
   clearScannerSession,
+  confirmPasswordReset,
   configureDms,
   deleteAttendance,
   deleteStudent,
@@ -21,6 +22,7 @@ import {
   markAttendanceFromFrames,
   registerOrganization,
   registerStudentSamples,
+  requestPasswordReset,
   setActiveOrgSlug,
   setAdminSession,
   setScannerSession,
@@ -41,6 +43,7 @@ const SCAN_COOLDOWN_MS = 1200;
 const SCAN_SUCCESS_PAUSE_MS = 1800;
 
 const DEFAULT_ORG_SLUG = "delight-model-school";
+const DEFAULT_ADMIN_EMAIL = "admin@delightmodelschool.in";
 const emptyOrgRegistration = {
   organization_name: "",
   org_type: "school",
@@ -67,13 +70,17 @@ export default function App() {
   const [selectedOrgSlug, setSelectedOrgSlug] = useState(
     sessionStorage.getItem("scanner_org_slug") || sessionStorage.getItem("admin_org_slug") || getActiveOrgSlug()
   );
-  const [adminUsername, setAdminUsername] = useState(sessionStorage.getItem("admin_username") || "admin");
+  const [adminUsername, setAdminUsername] = useState(sessionStorage.getItem("admin_username") || DEFAULT_ADMIN_EMAIL);
   const [adminPassword, setAdminPassword] = useState("");
   const [adminOrgName, setAdminOrgName] = useState(sessionStorage.getItem("admin_org_name") || "Delight Model School");
-  const [scannerUsername, setScannerUsername] = useState(sessionStorage.getItem("scanner_username") || "admin");
+  const [scannerUsername, setScannerUsername] = useState(sessionStorage.getItem("scanner_username") || DEFAULT_ADMIN_EMAIL);
   const [scannerPassword, setScannerPassword] = useState("");
   const [scannerOrgName, setScannerOrgName] = useState(sessionStorage.getItem("scanner_org_name") || "Delight Model School");
   const [authMode, setAuthMode] = useState("login");
+  const [resetEmail, setResetEmail] = useState(DEFAULT_ADMIN_EMAIL);
+  const [resetToken, setResetToken] = useState("");
+  const [resetNewPassword, setResetNewPassword] = useState("");
+  const [resetRequested, setResetRequested] = useState(false);
   const [billingPrice, setBillingPrice] = useState({ price_per_user_per_day: 3, default_billing_days: 30 });
   const [orgRegistration, setOrgRegistration] = useState(emptyOrgRegistration);
 
@@ -177,6 +184,20 @@ export default function App() {
   }
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const resetTokenParam = params.get("reset_token");
+    if (resetTokenParam) {
+      setPortal("admin");
+      setAuthMode("reset");
+      setResetToken(resetTokenParam);
+      setResetEmail(params.get("email") || DEFAULT_ADMIN_EMAIL);
+      const orgParam = params.get("org");
+      if (orgParam) {
+        setSelectedOrgSlug(orgParam);
+        setActiveOrgSlug(orgParam);
+      }
+    }
+
     Promise.all([getOrganizations(), getBillingPrice()])
       .then(([orgData, priceData]) => {
         const items = orgData.items || [];
@@ -531,6 +552,51 @@ export default function App() {
       setAdminOrgName(result.organization.name);
       setAdminPassword("");
       await loadAll();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onPasswordResetRequest(e) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+    try {
+      const result = await requestPasswordReset({
+        organizationSlug: selectedOrgSlug,
+        email: resetEmail,
+      });
+      setResetRequested(true);
+      setMessage(result.message || "If this email is registered, a reset link has been sent.");
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onPasswordResetConfirm(e) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage("");
+    try {
+      const result = await confirmPasswordReset({
+        organizationSlug: selectedOrgSlug,
+        email: resetEmail,
+        token: resetToken,
+        newPassword: resetNewPassword,
+      });
+      setMessage(result.message || "Password updated. Please login with the new password.");
+      setAdminUsername(resetEmail);
+      setScannerUsername(resetEmail);
+      setAdminPassword("");
+      setScannerPassword("");
+      setResetToken("");
+      setResetNewPassword("");
+      setResetRequested(false);
+      setAuthMode("login");
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -932,9 +998,10 @@ export default function App() {
               ))}
             </select>
             <input
-              placeholder="Admin username"
+              type="email"
+              placeholder="Admin email"
               value={adminUsername}
-              onChange={(e) => setAdminUsername(e.target.value)}
+              onChange={(e) => setAdminUsername(e.target.value.toLowerCase())}
               autoFocus
             />
             <input
@@ -945,7 +1012,69 @@ export default function App() {
             />
             <button disabled={loading} type="submit">{loading ? "Logging in..." : "Login"}</button>
           </form>
+          <button
+            type="button"
+            className="ghost-button full-width"
+            onClick={() => {
+              setResetEmail(adminUsername || DEFAULT_ADMIN_EMAIL);
+              setAuthMode("reset");
+            }}
+          >
+            Reset Password
+          </button>
           <p className="hint-text">Delight Model School is free. Use the admin credentials configured on the server.</p>
+        </>
+      ) : authMode === "reset" ? (
+        <>
+          <h2>Reset Password</h2>
+          {!resetRequested && !resetToken ? (
+            <form onSubmit={onPasswordResetRequest}>
+              <label className="field-label">Company / School</label>
+              <select value={selectedOrgSlug} onChange={(e) => onOrganizationChange(e.target.value)}>
+                {organizations.map((org) => (
+                  <option key={org.slug} value={org.slug}>
+                    {org.name}{org.is_free ? " (Free)" : ""}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="email"
+                placeholder="Admin email"
+                value={resetEmail}
+                onChange={(e) => setResetEmail(e.target.value.toLowerCase())}
+                required
+              />
+              <button disabled={loading} type="submit">{loading ? "Sending..." : "Send Reset Link"}</button>
+            </form>
+          ) : (
+            <form onSubmit={onPasswordResetConfirm}>
+              <input
+                type="email"
+                placeholder="Admin email"
+                value={resetEmail}
+                onChange={(e) => setResetEmail(e.target.value.toLowerCase())}
+                required
+              />
+              <input
+                placeholder="Reset token from email"
+                value={resetToken}
+                onChange={(e) => setResetToken(e.target.value)}
+                required
+              />
+              <input
+                type="password"
+                placeholder="New password"
+                value={resetNewPassword}
+                onChange={(e) => setResetNewPassword(e.target.value)}
+                required
+              />
+              <button disabled={loading} type="submit">{loading ? "Updating..." : "Update Password"}</button>
+            </form>
+          )}
+          <button type="button" className="ghost-button full-width" onClick={() => setAuthMode("login")}>
+            Back to Login
+          </button>
+          <p className="hint-text">Reset link will be sent to the registered admin email.</p>
         </>
       ) : (
         <>
@@ -974,7 +1103,7 @@ export default function App() {
             </div>
             <input placeholder="Payment reference / UPI transaction ID" value={orgRegistration.payment_reference} onChange={(e) => updateOrgRegistration("payment_reference", e.target.value)} required />
             <input placeholder="Admin full name" value={orgRegistration.admin_full_name} onChange={(e) => updateOrgRegistration("admin_full_name", e.target.value)} required />
-            <input placeholder="Create admin username" value={orgRegistration.admin_username} onChange={(e) => updateOrgRegistration("admin_username", e.target.value)} required />
+            <input type="email" placeholder="Create admin email" value={orgRegistration.admin_username} onChange={(e) => updateOrgRegistration("admin_username", e.target.value.toLowerCase())} required />
             <input type="password" placeholder="Create admin password" value={orgRegistration.admin_password} onChange={(e) => updateOrgRegistration("admin_password", e.target.value)} required />
             <button disabled={loading} type="submit">{loading ? "Activating..." : "Proceed & Create Admin"}</button>
           </form>
@@ -1008,9 +1137,10 @@ export default function App() {
             ))}
           </select>
           <input
-            placeholder="User username"
+            type="email"
+            placeholder="User email"
             value={scannerUsername}
-            onChange={(e) => setScannerUsername(e.target.value)}
+            onChange={(e) => setScannerUsername(e.target.value.toLowerCase())}
             autoFocus
           />
           <input
@@ -1053,11 +1183,14 @@ export default function App() {
             <video ref={videoRef} autoPlay playsInline muted onClick={() => videoRef.current?.play()} className="camera-preview scanner-preview" />
             {flashState && (
               <div className={`recognition-overlay ${flashState}`}>
-                {flashState === "success"
-                  ? "Attendance Marked"
-                  : flashState === "already"
-                    ? "Already Marked"
+                <strong>
+                  {flashState === "success" || flashState === "already"
+                    ? lastScan?.text || "Attendance marked"
                     : "Not Recognized"}
+                </strong>
+                {(flashState === "success" || flashState === "already") && lastScan?.confidence && (
+                  <span>{lastScan.type} | {lastScan.confidence}% match</span>
+                )}
               </div>
             )}
           </div>

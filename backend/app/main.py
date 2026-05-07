@@ -1,12 +1,18 @@
 import asyncio
 import gc
+import hashlib
 import logging
 import os
 import re
+import secrets
+import smtplib
+import ssl
 import time
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, time as dt_time, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal
+from email.message import EmailMessage
+from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -73,7 +79,7 @@ VALID_PERSON_TYPES = {"student", "staff", "teacher"}
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg"}
 DEFAULT_ORG_NAME = os.getenv("DEFAULT_FREE_ORG_NAME", "Delight Model School")
 DEFAULT_ORG_SLUG = os.getenv("DEFAULT_FREE_ORG_SLUG", "delight-model-school")
-DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
+DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin@delightmodelschool.in").strip().lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
 MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "2500000"))
 PRICE_PER_USER_PER_DAY = Decimal(os.getenv("PRICE_PER_USER_PER_DAY", "3"))
@@ -84,6 +90,16 @@ DEV_MODE = os.getenv("BIOMATRIC_DEV_MODE", "").lower() in {"1", "true", "yes"}
 
 DMS_DEFAULT_BASE_URL = os.getenv("DMS_BASE_URL", "").strip() or None
 DMS_DEFAULT_SECRET = os.getenv("DMS_WEBHOOK_SECRET", "").strip() or None
+APP_PUBLIC_URL = os.getenv("APP_PUBLIC_URL", os.getenv("PUBLIC_APP_URL", "")).strip().rstrip("/")
+PASSWORD_RESET_TOKEN_TTL_MINUTES = int(os.getenv("PASSWORD_RESET_TOKEN_TTL_MINUTES", "30"))
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", DEFAULT_ORG_NAME).strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes"}
+SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
 
 
 TENANT_SCHEMA_SQL = """
@@ -168,6 +184,16 @@ CREATE TABLE IF NOT EXISTS organization_admins (
   UNIQUE (organization_id, username)
 );
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id SERIAL PRIMARY KEY,
+  organization_id INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  admin_id INT NOT NULL REFERENCES organization_admins(id) ON DELETE CASCADE,
+  token_hash VARCHAR(64) UNIQUE NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS payments (
   id SERIAL PRIMARY KEY,
   organization_id INT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -177,6 +203,9 @@ CREATE TABLE IF NOT EXISTS payments (
   notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_lookup
+ON password_reset_tokens(token_hash, used_at, expires_at);
 """
 
 
@@ -241,6 +270,45 @@ def face_engine_schedule_label() -> str:
     if not windows:
         return "all day"
     return ", ".join(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in windows)
+
+
+def password_reset_email_ready() -> bool:
+    return bool(SMTP_HOST and SMTP_FROM_EMAIL and SMTP_USERNAME and SMTP_PASSWORD)
+
+
+def password_reset_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def password_reset_link(org_slug: str, email: str, token: str) -> str:
+    base_url = APP_PUBLIC_URL or "http://localhost:7200"
+    return (
+        f"{base_url}/admin?reset_token={quote(token)}"
+        f"&org={quote(org_slug)}&email={quote(email)}"
+    )
+
+
+def send_password_reset_email(to_email: str, org_name: str, reset_link: str):
+    message = EmailMessage()
+    message["Subject"] = f"{org_name} attendance password reset"
+    message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    message["To"] = to_email
+    message.set_content(
+        "A password reset was requested for your attendance admin account.\n\n"
+        f"Reset link:\n{reset_link}\n\n"
+        f"This link expires in {PASSWORD_RESET_TOKEN_TTL_MINUTES} minutes.\n"
+        "If you did not request this, ignore this email."
+    )
+
+    if SMTP_USE_SSL:
+        smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15, context=ssl.create_default_context())
+    else:
+        smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+    with smtp:
+        if SMTP_USE_TLS and not SMTP_USE_SSL:
+            smtp.starttls(context=ssl.create_default_context())
+        smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(message)
 
 
 async def read_image_upload(upload: UploadFile) -> bytes:
@@ -360,6 +428,37 @@ async def lifespan(app: FastAPI):
         )
         org = await get_organization_by_slug(db, DEFAULT_ORG_SLUG)
         if DEFAULT_ADMIN_PASSWORD:
+            if DEFAULT_ADMIN_USERNAME != "admin":
+                target = await db.execute(
+                    text(
+                        """
+                        SELECT id FROM organization_admins
+                        WHERE organization_id = :organization_id AND username = :username
+                        """
+                    ),
+                    {"organization_id": org["id"], "username": DEFAULT_ADMIN_USERNAME},
+                )
+                if target.first():
+                    await db.execute(
+                        text(
+                            """
+                            DELETE FROM organization_admins
+                            WHERE organization_id = :organization_id AND username = 'admin'
+                            """
+                        ),
+                        {"organization_id": org["id"]},
+                    )
+                else:
+                    await db.execute(
+                        text(
+                            """
+                            UPDATE organization_admins
+                            SET username = :username
+                            WHERE organization_id = :organization_id AND username = 'admin'
+                            """
+                        ),
+                        {"organization_id": org["id"], "username": DEFAULT_ADMIN_USERNAME},
+                    )
             await db.execute(
                 text(
                     """
@@ -786,6 +885,127 @@ async def admin_login(
         },
         "token": token,
     }
+
+
+@app.post("/auth/password-reset/request")
+@limiter.limit("5/minute")
+async def request_password_reset(
+    request: Request,
+    organization_slug: str = Form(...),
+    email: str = Form(...),
+):
+    normalized_email = email.strip().lower()
+    generic_response = {
+        "sent": True,
+        "message": "If this email is registered, a reset link has been sent.",
+    }
+    if not normalized_email:
+        return generic_response
+
+    async with SessionLocal() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT oa.id AS admin_id, o.id AS organization_id,
+                       o.name AS organization_name, o.slug
+                FROM organization_admins oa
+                JOIN organizations o ON o.id = oa.organization_id
+                WHERE o.slug = :slug AND oa.username = :email AND o.status = 'active'
+                """
+            ),
+            {"slug": organization_slug, "email": normalized_email},
+        )
+        row = result.mappings().first()
+        if not row:
+            return generic_response
+        if not password_reset_email_ready():
+            raise HTTPException(status_code=503, detail="Password reset email is not configured.")
+
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TOKEN_TTL_MINUTES)
+        await db.execute(
+            text(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = now()
+                WHERE admin_id = :admin_id AND used_at IS NULL
+                """
+            ),
+            {"admin_id": row["admin_id"]},
+        )
+        await db.execute(
+            text(
+                """
+                INSERT INTO password_reset_tokens (organization_id, admin_id, token_hash, expires_at)
+                VALUES (:organization_id, :admin_id, :token_hash, :expires_at)
+                """
+            ),
+            {
+                "organization_id": row["organization_id"],
+                "admin_id": row["admin_id"],
+                "token_hash": password_reset_token_hash(token),
+                "expires_at": expires_at,
+            },
+        )
+        await db.commit()
+
+    reset_link = password_reset_link(row["slug"], normalized_email, token)
+    try:
+        await asyncio.to_thread(send_password_reset_email, normalized_email, row["organization_name"], reset_link)
+    except Exception as exc:
+        LOGGER.exception("Password reset email failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not send reset email right now.")
+    return generic_response
+
+
+@app.post("/auth/password-reset/confirm")
+@limiter.limit("5/minute")
+async def confirm_password_reset(
+    request: Request,
+    organization_slug: str = Form(...),
+    email: str = Form(...),
+    token: str = Form(...),
+    new_password: str = Form(...),
+):
+    normalized_email = email.strip().lower()
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    async with SessionLocal() as db:
+        result = await db.execute(
+            text(
+                """
+                SELECT prt.id AS token_id, oa.id AS admin_id
+                FROM password_reset_tokens prt
+                JOIN organization_admins oa ON oa.id = prt.admin_id
+                JOIN organizations o ON o.id = prt.organization_id
+                WHERE o.slug = :slug
+                  AND oa.username = :email
+                  AND prt.token_hash = :token_hash
+                  AND prt.used_at IS NULL
+                  AND prt.expires_at > now()
+                """
+            ),
+            {
+                "slug": organization_slug,
+                "email": normalized_email,
+                "token_hash": password_reset_token_hash(token.strip()),
+            },
+        )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
+
+        await db.execute(
+            text("UPDATE organization_admins SET password_hash = :hash WHERE id = :admin_id"),
+            {"hash": hash_password(new_password), "admin_id": row["admin_id"]},
+        )
+        await db.execute(
+            text("UPDATE password_reset_tokens SET used_at = now() WHERE id = :token_id"),
+            {"token_id": row["token_id"]},
+        )
+        await db.commit()
+    return {"reset": True, "message": "Password updated. Please login with the new password."}
 
 
 def to_vector_literal(embedding: list[float]) -> str:

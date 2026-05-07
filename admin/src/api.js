@@ -128,6 +128,34 @@ export async function loginAdmin({ organizationSlug, username, password }) {
   return parseResponse(r, "Login failed");
 }
 
+export async function requestPasswordReset({ organizationSlug, email }) {
+  const form = new FormData();
+  form.append("organization_slug", organizationSlug);
+  form.append("email", email);
+
+  const r = await fetch(`${API_BASE}/auth/password-reset/request`, {
+    method: "POST",
+    body: form,
+  });
+
+  return parseResponse(r, "Password reset request failed");
+}
+
+export async function confirmPasswordReset({ organizationSlug, email, token, newPassword }) {
+  const form = new FormData();
+  form.append("organization_slug", organizationSlug);
+  form.append("email", email);
+  form.append("token", token);
+  form.append("new_password", newPassword);
+
+  const r = await fetch(`${API_BASE}/auth/password-reset/confirm`, {
+    method: "POST",
+    body: form,
+  });
+
+  return parseResponse(r, "Password reset failed");
+}
+
 export async function warmupScanner() {
   const r = await fetch(`${API_BASE}/scanner/warmup`, {
     method: "POST",
