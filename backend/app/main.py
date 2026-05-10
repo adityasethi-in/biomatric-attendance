@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS organization_admins (
   username VARCHAR(80) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
   full_name VARCHAR(128),
+  is_active BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE (organization_id, username)
 );
@@ -463,6 +464,8 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE students ADD COLUMN IF NOT EXISTS dms_person_id UUID",
             "CREATE INDEX IF NOT EXISTS idx_students_dms_person ON students(dms_person_kind, dms_person_id)",
             "ALTER TABLE organization_admins ALTER COLUMN password_hash TYPE VARCHAR(255)",
+            "ALTER TABLE organization_admins ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true",
+            "CREATE INDEX IF NOT EXISTS idx_organization_admins_is_active ON organization_admins(is_active)",
         ):
             await db.execute(text(stmt))
 
@@ -533,11 +536,9 @@ async def lifespan(app: FastAPI):
             await db.execute(
                 text(
                     """
-                    INSERT INTO organization_admins (organization_id, username, password_hash, full_name)
-                    VALUES (:organization_id, :username, :password_hash, 'Default Admin')
-                    ON CONFLICT (organization_id, username) DO UPDATE
-                    SET password_hash = EXCLUDED.password_hash,
-                        full_name = EXCLUDED.full_name
+                    INSERT INTO organization_admins (organization_id, username, password_hash, full_name, is_active)
+                    VALUES (:organization_id, :username, :password_hash, 'Default Admin', true)
+                    ON CONFLICT (organization_id, username) DO NOTHING
                     """
                 ),
                 {
@@ -688,6 +689,7 @@ async def _resolve_admin_row(db: AsyncSession, slug: str, username: str):
         text(
             """
             SELECT oa.id, oa.username, oa.password_hash, oa.full_name,
+                   COALESCE(oa.is_active, true) AS is_active,
                    o.id AS organization_id, o.name AS organization_name,
                    o.slug, o.status, o.is_free, o.seats, o.advance_amount,
                    o.dms_base_url, o.dms_webhook_secret,
@@ -715,7 +717,7 @@ async def require_admin(
 
     async with SessionLocal() as db:
         row = await _resolve_admin_row(db, slug, x_admin_username)
-        if not row or row["status"] != "active":
+        if not row or row["status"] != "active" or not row["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid admin login")
         if not verify_admin_token(row["slug"], row["username"], row["password_hash"], x_admin_token):
             raise HTTPException(status_code=401, detail="Invalid admin login")
@@ -737,7 +739,7 @@ async def require_operator(
 
     async with SessionLocal() as db:
         row = await _resolve_admin_row(db, slug, username)
-        if not row or row["status"] != "active":
+        if not row or row["status"] != "active" or not row["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid attendance login")
         if not verify_admin_token(row["slug"], row["username"], row["password_hash"], token):
             raise HTTPException(status_code=401, detail="Invalid attendance login")
@@ -778,7 +780,7 @@ async def scanner_override(
     normalized_username = username.strip().lower()
     async with SessionLocal() as db:
         row = await _resolve_admin_row(db, organization_slug, normalized_username)
-        if not row or row["status"] != "active":
+        if not row or row["status"] != "active" or not row["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid admin login")
         ok, needs_rehash = verify_password(password, row["password_hash"])
         if not ok:
@@ -931,8 +933,8 @@ async def register_organization(
         await db.execute(
             text(
                 """
-                INSERT INTO organization_admins (organization_id, username, password_hash, full_name)
-                VALUES (:organization_id, :username, :password_hash, :full_name)
+                INSERT INTO organization_admins (organization_id, username, password_hash, full_name, is_active)
+                VALUES (:organization_id, :username, :password_hash, :full_name, true)
                 """
             ),
             {
@@ -984,6 +986,7 @@ async def admin_login(
             text(
                 """
                 SELECT oa.id, oa.username, oa.password_hash, oa.full_name,
+                       COALESCE(oa.is_active, true) AS is_active,
                        o.id AS organization_id, o.name AS organization_name, o.slug,
                        o.status, o.is_free, o.seats, o.advance_amount,
                        (o.dms_base_url IS NOT NULL AND o.dms_webhook_secret IS NOT NULL) AS dms_linked
@@ -996,6 +999,8 @@ async def admin_login(
         )
         row = result.mappings().first()
         if not row:
+            raise HTTPException(status_code=401, detail="Invalid company/admin login")
+        if not row["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid company/admin login")
 
         ok, needs_rehash = verify_password(password, row["password_hash"])
@@ -1058,7 +1063,10 @@ async def request_password_reset(
                        o.name AS organization_name, o.slug
                 FROM organization_admins oa
                 JOIN organizations o ON o.id = oa.organization_id
-                WHERE o.slug = :slug AND oa.username = :email AND o.status = 'active'
+                WHERE o.slug = :slug
+                  AND oa.username = :email
+                  AND o.status = 'active'
+                  AND COALESCE(oa.is_active, true) = true
                 """
             ),
             {"slug": organization_slug, "email": normalized_email},
@@ -1129,6 +1137,7 @@ async def confirm_password_reset(
                 JOIN organizations o ON o.id = prt.organization_id
                 WHERE o.slug = :slug
                   AND oa.username = :email
+                  AND COALESCE(oa.is_active, true) = true
                   AND prt.token_hash = :token_hash
                   AND prt.used_at IS NULL
                   AND prt.expires_at > now()
