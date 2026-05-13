@@ -139,12 +139,18 @@ export default function App() {
     return `${person.code} - ${person.fullName}${person.extra ? ` (${person.extra})` : ""}`;
   }
 
+  function clearDmsLinkedDetails() {
+    setStudentCode("");
+    setFullName("");
+    setPersonType("student");
+  }
+
   function selectDmsPerson(person) {
     if (!person || person.linked) return;
     setDmsLinkChoice(person.value);
     setDmsLinkSearch(getDmsPersonLabel(person));
-    if (!studentCode) setStudentCode(person.code || "");
-    if (!fullName) setFullName(person.fullName || "");
+    setStudentCode(person.code || "");
+    setFullName(person.fullName || "");
     setPersonType(person.kind === "teacher" ? "teacher" : "student");
     setDmsLinkPickerOpen(false);
   }
@@ -152,6 +158,7 @@ export default function App() {
   function clearDmsLinkSelection() {
     setDmsLinkChoice("");
     setDmsLinkSearch("");
+    clearDmsLinkedDetails();
     setDmsLinkPickerOpen(false);
   }
 
@@ -1079,6 +1086,7 @@ export default function App() {
                       setDmsLinkPickerOpen(true);
                       if (selectedDmsPerson && nextSearch !== getDmsPersonLabel(selectedDmsPerson)) {
                         setDmsLinkChoice("");
+                        clearDmsLinkedDetails();
                       }
                     }}
                   />
