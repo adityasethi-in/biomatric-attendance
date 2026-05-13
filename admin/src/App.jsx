@@ -96,6 +96,8 @@ export default function App() {
   const [personType, setPersonType] = useState("student");
   const [enrollmentSamples, setEnrollmentSamples] = useState([]);
   const [dmsLinkChoice, setDmsLinkChoice] = useState("");
+  const [dmsLinkSearch, setDmsLinkSearch] = useState("");
+  const [dmsLinkPickerOpen, setDmsLinkPickerOpen] = useState(false);
 
   const [dmsStatus, setDmsStatus] = useState({ linked: false });
   const [dmsRoster, setDmsRoster] = useState({ students: [], teachers: [] });
@@ -124,11 +126,33 @@ export default function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
+  const dmsLinkPickerRef = useRef(null);
   const scanInFlightRef = useRef(false);
   const nextScanAllowedAtRef = useRef(0);
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function getDmsPersonLabel(person) {
+    if (!person) return "";
+    return `${person.code} - ${person.fullName}${person.extra ? ` (${person.extra})` : ""}`;
+  }
+
+  function selectDmsPerson(person) {
+    if (!person || person.linked) return;
+    setDmsLinkChoice(person.value);
+    setDmsLinkSearch(getDmsPersonLabel(person));
+    if (!studentCode) setStudentCode(person.code || "");
+    if (!fullName) setFullName(person.fullName || "");
+    setPersonType(person.kind === "teacher" ? "teacher" : "student");
+    setDmsLinkPickerOpen(false);
+  }
+
+  function clearDmsLinkSelection() {
+    setDmsLinkChoice("");
+    setDmsLinkSearch("");
+    setDmsLinkPickerOpen(false);
   }
 
   async function loadAll() {
@@ -402,6 +426,8 @@ export default function App() {
       setPersonType("student");
       setEnrollmentSamples([]);
       setDmsLinkChoice("");
+      setDmsLinkSearch("");
+      setDmsLinkPickerOpen(false);
       await loadAll();
     } catch (err) {
       const duplicateDetail = err.data?.detail;
@@ -793,6 +819,45 @@ export default function App() {
     return () => window.removeEventListener("popstate", onRoute);
   }, []);
 
+  useEffect(() => {
+    const onPointerDown = (event) => {
+      if (!dmsLinkPickerRef.current?.contains(event.target)) {
+        setDmsLinkPickerOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  const dmsPersonOptions = [
+    ...(dmsRoster.students || []).map((person) => ({
+      ...person,
+      kind: "student",
+      kindLabel: "Student",
+      value: `student:${person.person_id}`,
+      fullName: person.full_name,
+      linked: students.find((profile) => profile.dms_person_id === person.person_id),
+    })),
+    ...(dmsRoster.teachers || []).map((person) => ({
+      ...person,
+      kind: "teacher",
+      kindLabel: "Teacher",
+      value: `teacher:${person.person_id}`,
+      fullName: person.full_name,
+      linked: students.find((profile) => profile.dms_person_id === person.person_id),
+    })),
+  ];
+  const selectedDmsPerson = dmsPersonOptions.find((person) => person.value === dmsLinkChoice);
+  const dmsSearchQuery = dmsLinkSearch.trim().toLowerCase();
+  const filteredDmsPeople = dmsPersonOptions.filter((person) => {
+    if (!dmsSearchQuery) return true;
+    return [person.code, person.fullName, person.extra, person.kindLabel]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(dmsSearchQuery);
+  });
+
   const selectedOrganization = organizations.find((org) => org.slug === selectedOrgSlug);
   const advanceAmount =
     Number(orgRegistration.seats || 0) *
@@ -911,46 +976,60 @@ export default function App() {
           {dmsStatus.linked && (
             <>
               <label className="field-label">Link to DMS person (optional)</label>
-              <select value={dmsLinkChoice} onChange={(e) => {
-                const choice = e.target.value;
-                setDmsLinkChoice(choice);
-                if (choice && choice.includes(":")) {
-                  const [kind, id] = choice.split(":");
-                  const list = kind === "student" ? dmsRoster.students : dmsRoster.teachers;
-                  const match = (list || []).find((p) => p.person_id === id);
-                  if (match) {
-                    if (!studentCode) setStudentCode(match.code);
-                    if (!fullName) setFullName(match.full_name);
-                    setPersonType(kind === "teacher" ? "teacher" : "student");
-                  }
-                }
-              }}>
-                <option value="">Not linked</option>
-                {(dmsRoster.students || []).length > 0 && (
-                  <optgroup label="Students">
-                    {dmsRoster.students.map((p) => {
-                      const linked = students.find((s) => s.dms_person_id === p.person_id);
-                      return (
-                        <option key={`student:${p.person_id}`} value={`student:${p.person_id}`} disabled={!!linked}>
-                          {p.code} — {p.full_name}{p.extra ? ` (${p.extra})` : ""}{linked ? " · already linked" : ""}
-                        </option>
-                      );
-                    })}
-                  </optgroup>
+              <div className="dms-link-picker" ref={dmsLinkPickerRef}>
+                <div className="dms-link-search-row">
+                  <input
+                    type="search"
+                    placeholder="Search name, admission no, class..."
+                    value={dmsLinkSearch}
+                    autoComplete="off"
+                    onFocus={() => setDmsLinkPickerOpen(true)}
+                    onChange={(e) => {
+                      const nextSearch = e.target.value;
+                      setDmsLinkSearch(nextSearch);
+                      setDmsLinkPickerOpen(true);
+                      if (selectedDmsPerson && nextSearch !== getDmsPersonLabel(selectedDmsPerson)) {
+                        setDmsLinkChoice("");
+                      }
+                    }}
+                  />
+                  {(dmsLinkChoice || dmsLinkSearch) && (
+                    <button type="button" className="ghost-button dms-link-clear" onClick={clearDmsLinkSelection}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <p className="dms-link-helper">
+                  {selectedDmsPerson
+                    ? `Selected: ${getDmsPersonLabel(selectedDmsPerson)}`
+                    : "Type or tap to search DMS roster. Already-linked people stay visible but cannot be selected again."}
+                </p>
+                {dmsLinkPickerOpen && (
+                  <div className="dms-link-dropdown">
+                    {filteredDmsPeople.length > 0 ? (
+                      filteredDmsPeople.map((person) => (
+                        <button
+                          key={person.value}
+                          type="button"
+                          className={`dms-link-option${person.linked ? " is-linked" : ""}`}
+                          disabled={!!person.linked}
+                          onClick={() => selectDmsPerson(person)}
+                        >
+                          <span>
+                            <strong>{person.fullName}</strong>
+                            <small>
+                              {person.kindLabel} - {person.code}{person.extra ? ` - ${person.extra}` : ""}
+                            </small>
+                          </span>
+                          <em>{person.linked ? "Already linked" : "Select"}</em>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="dms-link-empty">No DMS person found. Try another name, admission no, or class.</div>
+                    )}
+                  </div>
                 )}
-                {(dmsRoster.teachers || []).length > 0 && (
-                  <optgroup label="Teachers">
-                    {dmsRoster.teachers.map((p) => {
-                      const linked = students.find((s) => s.dms_person_id === p.person_id);
-                      return (
-                        <option key={`teacher:${p.person_id}`} value={`teacher:${p.person_id}`} disabled={!!linked}>
-                          {p.code} — {p.full_name}{linked ? " · already linked" : ""}
-                        </option>
-                      );
-                    })}
-                  </optgroup>
-                )}
-              </select>
+              </div>
             </>
           )}
 
