@@ -863,6 +863,56 @@ export default function App() {
     Number(orgRegistration.seats || 0) *
     Number(orgRegistration.billing_days || billingPrice.default_billing_days || 30) *
     Number(billingPrice.price_per_user_per_day || 3);
+  const rosterStudents = dmsRoster.students || [];
+  const rosterTeachers = dmsRoster.teachers || [];
+  const countRosterLinked = (kind, roster) => {
+    const linkedIds = new Set(
+      students
+        .filter((profile) => profile.dms_person_kind === kind && profile.dms_person_id)
+        .map((profile) => String(profile.dms_person_id))
+    );
+    return roster.filter((person) => linkedIds.has(String(person.person_id))).length;
+  };
+  const studentLinked = countRosterLinked("student", rosterStudents);
+  const teacherLinked = countRosterLinked("teacher", rosterTeachers);
+  const studentProfiles = students.filter((profile) => profile.person_type === "student");
+  const teacherProfiles = students.filter((profile) => profile.person_type === "teacher");
+  const staffProfiles = students.filter((profile) => profile.person_type === "staff");
+  const localStudentLinked = studentProfiles.filter((profile) => profile.dms_person_id).length;
+  const localTeacherLinked = teacherProfiles.filter((profile) => profile.dms_person_id).length;
+  const staffLinked = staffProfiles.filter((profile) => profile.dms_person_id).length;
+  const hasStudentRoster = dmsStatus.linked && rosterStudents.length > 0;
+  const hasTeacherRoster = dmsStatus.linked && rosterTeachers.length > 0;
+  const buildCoverageCard = ({ title, subtitle, total, linked, tone }) => {
+    const safeTotal = Number(total || 0);
+    const safeLinked = Math.min(Number(linked || 0), safeTotal);
+    const unlinked = Math.max(safeTotal - safeLinked, 0);
+    const percent = safeTotal > 0 ? Math.round((safeLinked / safeTotal) * 100) : 0;
+    return { title, subtitle, total: safeTotal, linked: safeLinked, unlinked, percent, tone };
+  };
+  const coverageCards = summary ? [
+    buildCoverageCard({
+      title: "Students",
+      subtitle: hasStudentRoster ? "DMS roster coverage" : "Registered face profiles",
+      total: hasStudentRoster ? rosterStudents.length : summary.students,
+      linked: hasStudentRoster ? studentLinked : localStudentLinked,
+      tone: "student",
+    }),
+    buildCoverageCard({
+      title: "Teachers",
+      subtitle: hasTeacherRoster ? "DMS roster coverage" : "Registered face profiles",
+      total: hasTeacherRoster ? rosterTeachers.length : summary.teachers,
+      linked: hasTeacherRoster ? teacherLinked : localTeacherLinked,
+      tone: "teacher",
+    }),
+    buildCoverageCard({
+      title: "Office / Staff",
+      subtitle: "Local attendance profiles",
+      total: summary.staff,
+      linked: staffLinked,
+      tone: "staff",
+    }),
+  ] : [];
 
   function updateOrgRegistration(field, value) {
     setOrgRegistration((current) => ({ ...current, [field]: value }));
@@ -877,19 +927,58 @@ export default function App() {
       </section>
 
       {summary && (
-        <section className="summary-grid">
-          <div><strong>{summary.total_people}</strong><span>Total</span></div>
-          <div><strong>{summary.students}</strong><span>Students</span></div>
-          <div><strong>{summary.staff}</strong><span>Staff</span></div>
-          <div><strong>{summary.teachers}</strong><span>Teachers</span></div>
-          <div><strong>{summary.today_present}</strong><span>Present Today</span></div>
-          <div><strong>{summary.total_samples}</strong><span>Face Samples</span></div>
-          {dmsStatus.linked && (
-            <>
-              <div><strong>{summary.dms_linked || 0}</strong><span>DMS Linked</span></div>
-              <div><strong>{summary.dms_pending || 0}</strong><span>DMS Pending</span></div>
-            </>
-          )}
+        <section className="card metrics-dashboard">
+          <div className="metrics-hero">
+            <div>
+              <span className="metrics-kicker">Live attendance coverage</span>
+              <h2>DMS linking dashboard</h2>
+              <p>
+                Track how many DMS people are connected to face profiles before daily attendance scans.
+              </p>
+            </div>
+            <div className="metrics-score">
+              <strong>{summary.total_people}</strong>
+              <span>Face profiles</span>
+            </div>
+          </div>
+
+          <div className="quick-metrics">
+            <div>
+              <strong>{summary.today_present}</strong>
+              <span>Present today</span>
+            </div>
+            <div>
+              <strong>{summary.total_samples}</strong>
+              <span>Face samples</span>
+            </div>
+            <div>
+              <strong>{summary.dms_pending || 0}</strong>
+              <span>DMS pending</span>
+            </div>
+          </div>
+
+          <div className="coverage-grid">
+            {coverageCards.map((card) => (
+              <article className={`coverage-card ${card.tone}`} key={card.title}>
+                <div className="coverage-card-head">
+                  <span className="coverage-mark">{card.title.slice(0, 2).toUpperCase()}</span>
+                  <div>
+                    <strong>{card.title}</strong>
+                    <small>{card.subtitle}</small>
+                  </div>
+                </div>
+                <div className="coverage-numbers">
+                  <div><strong>{card.total}</strong><span>Total</span></div>
+                  <div><strong>{card.linked}</strong><span>Linked</span></div>
+                  <div><strong>{card.unlinked}</strong><span>Unlinked</span></div>
+                </div>
+                <div className="coverage-progress" aria-label={`${card.percent}% linked`}>
+                  <span style={{ width: `${card.percent}%` }} />
+                </div>
+                <p>{card.percent}% linked</p>
+              </article>
+            ))}
+          </div>
         </section>
       )}
 

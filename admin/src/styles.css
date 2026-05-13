@@ -448,6 +448,265 @@ button:disabled {
   letter-spacing: 0.05em;
 }
 
+.metrics-dashboard {
+  padding: 0;
+  overflow: hidden;
+  border-color: rgba(15, 118, 110, 0.18);
+  background:
+    radial-gradient(circle at 10% 0%, rgba(20, 184, 166, 0.16), transparent 38%),
+    radial-gradient(circle at 100% 14%, rgba(201, 137, 43, 0.14), transparent 34%),
+    linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.metrics-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 18px;
+  background:
+    linear-gradient(135deg, rgba(6, 17, 31, 0.96), rgba(17, 36, 58, 0.95)),
+    var(--bg-deep);
+  color: #ffffff;
+}
+
+.metrics-kicker {
+  display: inline-flex;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.10);
+  color: #bff4ea;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.metrics-hero h2 {
+  margin: 10px 0 5px;
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+
+.metrics-hero p {
+  margin: 0;
+  color: #b8c4d2;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.metrics-score {
+  display: grid;
+  place-items: center;
+  min-width: 92px;
+  padding: 15px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.metrics-score strong {
+  font-size: 32px;
+  line-height: 1;
+}
+
+.metrics-score span {
+  margin-top: 5px;
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.quick-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+
+.quick-metrics div {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: var(--shadow-soft);
+}
+
+.quick-metrics strong,
+.quick-metrics span {
+  display: block;
+}
+
+.quick-metrics strong {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.quick-metrics span {
+  margin-top: 5px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.coverage-grid {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.coverage-card {
+  position: relative;
+  overflow: hidden;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: var(--shadow-soft);
+}
+
+.coverage-card::after {
+  content: "";
+  position: absolute;
+  width: 110px;
+  height: 110px;
+  right: -42px;
+  top: -46px;
+  border-radius: 50%;
+  background: rgba(15, 118, 110, 0.10);
+}
+
+.coverage-card.teacher::after {
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.coverage-card.staff::after {
+  background: rgba(201, 137, 43, 0.15);
+}
+
+.coverage-card-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.coverage-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 15px;
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+}
+
+.coverage-card.teacher .coverage-mark {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.coverage-card.staff .coverage-mark {
+  background: #fff7ed;
+  color: #a16207;
+}
+
+.coverage-card-head strong,
+.coverage-card-head small {
+  display: block;
+}
+
+.coverage-card-head strong {
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.coverage-card-head small {
+  margin-top: 2px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.coverage-numbers {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 13px;
+}
+
+.coverage-numbers div {
+  padding: 9px;
+  border-radius: 13px;
+  background: var(--surface-soft);
+}
+
+.coverage-numbers strong,
+.coverage-numbers span {
+  display: block;
+}
+
+.coverage-numbers strong {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.coverage-numbers span {
+  margin-top: 4px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.coverage-progress {
+  position: relative;
+  z-index: 1;
+  height: 9px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: #e2e8f0;
+}
+
+.coverage-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), #22c55e);
+  transition: width 0.25s ease;
+}
+
+.coverage-card.teacher .coverage-progress span {
+  background: linear-gradient(90deg, #2563eb, #06b6d4);
+}
+
+.coverage-card.staff .coverage-progress span {
+  background: linear-gradient(90deg, #d97706, #f59e0b);
+}
+
+.coverage-card p {
+  position: relative;
+  z-index: 1;
+  margin: 7px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
