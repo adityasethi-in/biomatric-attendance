@@ -719,6 +719,41 @@ button:disabled {
   margin: 0;
 }
 
+.attendance-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) auto auto;
+  gap: 10px;
+  align-items: end;
+  margin: 12px 0 8px;
+}
+
+.filter-field {
+  display: grid;
+  gap: 5px;
+}
+
+.filter-field span,
+.attendance-filter-summary {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.attendance-filter-summary {
+  margin: 0 0 8px;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.empty-table {
+  padding: 18px 12px;
+  color: var(--text-soft);
+  text-align: center;
+  font-weight: 800;
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;
@@ -1200,6 +1235,12 @@ tr:hover td {
 
 .brand-footer a:hover {
   text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .attendance-filter-bar {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (min-width: 900px) {

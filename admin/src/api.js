@@ -94,8 +94,12 @@ export async function getStudents() {
   return parseResponse(r, "Failed to load students");
 }
 
-export async function getReport() {
-  const r = await fetch(`${API_BASE}/attendance/report`, { headers: adminHeaders() });
+export async function getReport({ date = "", personType = "" } = {}) {
+  const params = new URLSearchParams();
+  if (date) params.set("date", date);
+  if (personType && personType !== "all") params.set("person_type", personType);
+  const query = params.toString();
+  const r = await fetch(`${API_BASE}/attendance/report${query ? `?${query}` : ""}`, { headers: adminHeaders() });
   return parseResponse(r, "Failed to load report");
 }
 

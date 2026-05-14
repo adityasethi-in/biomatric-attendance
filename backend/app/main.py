@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import math
 
 import httpx
-from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import Limiter
@@ -2206,19 +2206,47 @@ async def delete_student(student_id: int, db: AsyncSession = Depends(get_tenant_
 
 
 @app.get("/attendance/report")
-async def attendance_report(db: AsyncSession = Depends(get_tenant_db), _admin: dict = Depends(require_admin)):
+async def attendance_report(
+    attendance_date: str | None = Query(default=None, alias="date"),
+    person_type: str = Query(default="all"),
+    db: AsyncSession = Depends(get_tenant_db),
+    _admin: dict = Depends(require_admin),
+):
+    filters = []
+    params: dict[str, object] = {"limit": 500, "tz": APP_TIMEZONE}
+    selected_date = (attendance_date or "").strip()
+    selected_type = (person_type or "all").strip().lower()
+
+    if selected_date:
+        try:
+            datetime.strptime(selected_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+        filters.append("(a.marked_at AT TIME ZONE :tz)::date = CAST(:report_date AS date)")
+        params["report_date"] = selected_date
+
+    if selected_type == "office":
+        selected_type = "staff"
+    if selected_type and selected_type != "all":
+        selected_type = normalize_person_type(selected_type)
+        filters.append("s.person_type = :person_type")
+        params["person_type"] = selected_type
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     res = await db.execute(
         text(
-            """
+            f"""
             SELECT a.id, s.student_code, s.full_name, s.person_type,
                    s.dms_person_kind, s.dms_person_id,
                    a.status, a.confidence, a.marked_at
             FROM attendance_logs a
             JOIN students s ON s.id = a.student_id
+            {where_clause}
             ORDER BY a.marked_at DESC
-            LIMIT 500
+            LIMIT :limit
             """
-        )
+        ),
+        params,
     )
     rows = res.mappings().all()
     items = []
@@ -2227,7 +2255,7 @@ async def attendance_report(db: AsyncSession = Depends(get_tenant_db), _admin: d
         if d.get("dms_person_id") is not None:
             d["dms_person_id"] = str(d["dms_person_id"])
         items.append(d)
-    return {"items": items}
+    return {"items": items, "date": selected_date or None, "person_type": selected_type if selected_type != "all" else None}
 
 
 @app.delete("/attendance/{attendance_id}")

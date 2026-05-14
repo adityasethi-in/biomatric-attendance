@@ -72,6 +72,24 @@ const emptyOrgRegistration = {
   admin_password: "",
 };
 
+function todayInputValue() {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  return now.toISOString().slice(0, 10);
+}
+
+function formatFilterDateLabel(value) {
+  if (!value) return "All dates";
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-IN", {
+    weekday: "long",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 export default function App() {
   const [portal, setPortal] = useState(window.location.pathname === "/admin" ? "admin" : "attendance");
   const [adminAuthenticated, setAdminAuthenticated] = useState(
@@ -119,6 +137,8 @@ export default function App() {
 
   const [students, setStudents] = useState([]);
   const [report, setReport] = useState([]);
+  const [attendanceDateFilter, setAttendanceDateFilter] = useState(todayInputValue());
+  const [attendanceTypeFilter, setAttendanceTypeFilter] = useState("all");
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
@@ -230,7 +250,7 @@ export default function App() {
   async function loadAll() {
     const [s, r, summaryData, statusData] = await Promise.all([
       getStudents(),
-      getReport(),
+      getReport({ date: attendanceDateFilter, personType: attendanceTypeFilter }),
       getSummary(),
       getDmsStatus().catch(() => ({ linked: false })),
     ]);
@@ -319,7 +339,7 @@ export default function App() {
     if (adminAuthenticated && portal === "admin") {
       loadAll().catch((err) => setMessage(err.message));
     }
-  }, [selectedOrgSlug, adminAuthenticated, portal]);
+  }, [selectedOrgSlug, adminAuthenticated, portal, attendanceDateFilter, attendanceTypeFilter]);
 
   useEffect(() => {
     if (!("speechSynthesis" in window)) return undefined;
@@ -1009,6 +1029,13 @@ export default function App() {
       tone: "staff",
     }),
   ] : [];
+  const attendanceTypeLabels = {
+    all: "All people",
+    student: "Students",
+    teacher: "Teachers",
+    staff: "Office / Staff",
+  };
+  const attendanceFilterSummary = `${formatFilterDateLabel(attendanceDateFilter)} | ${attendanceTypeLabels[attendanceTypeFilter] || "All people"}`;
 
   function updateOrgRegistration(field, value) {
     setOrgRegistration((current) => ({ ...current, [field]: value }));
@@ -1298,13 +1325,37 @@ export default function App() {
           <h2>Attendance</h2>
           <button className="danger-button" disabled={loading || report.length === 0} onClick={onClearAttendance}>Clear Entries</button>
         </div>
+        <div className="attendance-filter-bar">
+          <label className="filter-field">
+            <span>Date / Day</span>
+            <input type="date" value={attendanceDateFilter} onChange={(e) => setAttendanceDateFilter(e.target.value)} />
+          </label>
+          <label className="filter-field">
+            <span>Person type</span>
+            <select value={attendanceTypeFilter} onChange={(e) => setAttendanceTypeFilter(e.target.value)}>
+              <option value="all">All people</option>
+              <option value="student">Students</option>
+              <option value="teacher">Teachers</option>
+              <option value="staff">Office / Staff</option>
+            </select>
+          </label>
+          <button type="button" className="ghost-button" onClick={() => setAttendanceDateFilter(todayInputValue())}>Today</button>
+          <button type="button" className="ghost-button" onClick={() => setAttendanceDateFilter("")}>All Dates</button>
+        </div>
+        <p className="attendance-filter-summary">
+          Showing {report.length} attendance entr{report.length === 1 ? "y" : "ies"} for {attendanceFilterSummary}
+        </p>
         <div className="table-wrap">
           <table>
             <thead>
               <tr><th>ID</th><th>Code</th><th>Name</th><th>Type</th><th>Status</th><th>Confidence</th><th>Time</th><th>Action</th></tr>
             </thead>
             <tbody>
-              {report.map((entry) => (
+              {report.length === 0 ? (
+                <tr>
+                  <td colSpan="8" className="empty-table">No attendance entries found for this filter.</td>
+                </tr>
+              ) : report.map((entry) => (
                 <tr key={entry.id}>
                   <td>{entry.id}</td>
                   <td>{entry.student_code}</td>
