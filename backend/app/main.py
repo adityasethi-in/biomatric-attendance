@@ -2223,7 +2223,7 @@ async def attendance_report(
         except ValueError:
             raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
         filters.append("(a.marked_at AT TIME ZONE :tz)::date = CAST(:report_date AS date)")
-        params["report_date"] = selected_date
+        params["report_date"] = datetime.strptime(selected_date, "%Y-%m-%d").date()
 
     if selected_type == "office":
         selected_type = "staff"
