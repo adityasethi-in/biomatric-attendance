@@ -46,6 +46,18 @@ const SCAN_SUCCESS_PAUSE_MS = 1800;
 const DEFAULT_ORG_SLUG = "delight-model-school";
 const DEFAULT_ADMIN_EMAIL = "admin@delightmodelschool.in";
 const SCANNER_CLOSED_TEXT = "Scanner is available 7:00 AM to 11:00 AM. Admin can unlock for 30 minutes.";
+const INDIAN_VOICE_KEYWORDS = [
+  "india",
+  "indian",
+  "hindi",
+  "neerja",
+  "prabhat",
+  "ravi",
+  "heera",
+  "swara",
+  "madhur",
+  "google hindi",
+];
 const emptyOrgRegistration = {
   organization_name: "",
   org_type: "school",
@@ -130,9 +142,36 @@ export default function App() {
   const scanInFlightRef = useRef(false);
   const nextScanAllowedAtRef = useRef(0);
   const lastSpokenRef = useRef({ text: "", at: 0 });
+  const speechVoicesRef = useRef([]);
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function getIndianSpeechVoice() {
+    if (!("speechSynthesis" in window)) return null;
+    const voices = speechVoicesRef.current.length ? speechVoicesRef.current : window.speechSynthesis.getVoices();
+    if (!voices.length) return null;
+
+    const scoredVoices = voices
+      .map((voice) => {
+        const lang = (voice.lang || "").toLowerCase();
+        const name = (voice.name || "").toLowerCase();
+        let score = 0;
+
+        if (lang === "en-in") score += 100;
+        if (lang === "hi-in") score += 90;
+        if (lang.endsWith("-in")) score += 70;
+        if (INDIAN_VOICE_KEYWORDS.some((keyword) => name.includes(keyword))) score += 55;
+        if (name.includes("english") && (name.includes("india") || name.includes("indian"))) score += 25;
+        if (voice.localService) score += 5;
+
+        return { voice, score };
+      })
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return scoredVoices[0]?.voice || null;
   }
 
   function speakAnnouncement(text, { minGapMs = 7000 } = {}) {
@@ -146,10 +185,12 @@ export default function App() {
 
     try {
       window.speechSynthesis.cancel();
+      const indianVoice = getIndianSpeechVoice();
       const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.lang = "en-IN";
-      utterance.rate = 0.95;
-      utterance.pitch = 1;
+      if (indianVoice) utterance.voice = indianVoice;
+      utterance.lang = indianVoice?.lang || "en-IN";
+      utterance.rate = 0.9;
+      utterance.pitch = 1.02;
       utterance.volume = 1;
       lastSpokenRef.current = { text: cleanText, at: now };
       window.speechSynthesis.speak(utterance);
@@ -279,6 +320,25 @@ export default function App() {
       loadAll().catch((err) => setMessage(err.message));
     }
   }, [selectedOrgSlug, adminAuthenticated, portal]);
+
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return undefined;
+    const synth = window.speechSynthesis;
+    const loadVoices = () => {
+      speechVoicesRef.current = synth.getVoices() || [];
+    };
+
+    loadVoices();
+    if (typeof synth.addEventListener === "function") {
+      synth.addEventListener("voiceschanged", loadVoices);
+      return () => synth.removeEventListener("voiceschanged", loadVoices);
+    }
+
+    synth.onvoiceschanged = loadVoices;
+    return () => {
+      if (synth.onvoiceschanged === loadVoices) synth.onvoiceschanged = null;
+    };
+  }, []);
 
   function stopCameraStream() {
     if (streamRef.current) {
