@@ -129,9 +129,33 @@ export default function App() {
   const dmsLinkPickerRef = useRef(null);
   const scanInFlightRef = useRef(false);
   const nextScanAllowedAtRef = useRef(0);
+  const lastSpokenRef = useRef({ text: "", at: 0 });
 
   function sleep(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function speakAnnouncement(text, { minGapMs = 7000 } = {}) {
+    const cleanText = String(text || "").trim();
+    if (!cleanText || !("speechSynthesis" in window)) return;
+
+    const now = Date.now();
+    if (lastSpokenRef.current.text === cleanText && now - lastSpokenRef.current.at < minGapMs) {
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.lang = "en-IN";
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      lastSpokenRef.current = { text: cleanText, at: now };
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Speech is a progressive enhancement; scanner should keep working silently if blocked.
+    }
   }
 
   function getDmsPersonLabel(person) {
@@ -357,10 +381,11 @@ export default function App() {
         const confidence = result.confidence ?? Math.round((1 - result.distance) * 100);
         const type = result.person_type || "person";
         const text = result.already_marked
-          ? `${result.name} already marked today`
+          ? `Attendance already marked for ${result.name}`
           : `Attendance marked for ${result.name}`;
         setLastScan({ text, confidence, type });
         setMessage("");
+        speakAnnouncement(text);
         setScannerStatus("Recognized. Continuing scan...");
         setFlashState(result.already_marked ? "already" : "success");
         setTimeout(() => setFlashState(null), 1400);
@@ -425,9 +450,9 @@ export default function App() {
         dmsPersonKind: dmsKind,
         dmsPersonId: dmsId,
       });
-      setMessage(
-        `${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} with ${result.sample_count} face samples.${result.dms_person_id ? " Linked to DMS." : ""}`
-      );
+      const registrationMessage = `${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} with ${result.sample_count} face samples.${result.dms_person_id ? " Linked to DMS." : ""}`;
+      setMessage(registrationMessage);
+      speakAnnouncement(`${result.re_enrolled ? "Profile re-enrolled" : "Profile registered"} for ${fullName}`, { minGapMs: 2500 });
       setStudentCode("");
       setFullName("");
       setPersonType("student");
@@ -446,6 +471,7 @@ export default function App() {
           serverRejected: true,
         });
         setMessage("");
+        speakAnnouncement(`This face is already registered for ${duplicateDetail.match.full_name}`, { minGapMs: 2500 });
       } else {
         setMessage(err.message);
       }
@@ -477,6 +503,9 @@ export default function App() {
         sampleCount: check.sample_count,
       });
       setMessage("");
+      if (check.duplicate && check.match?.full_name) {
+        speakAnnouncement(`This face is already registered for ${check.match.full_name}`, { minGapMs: 2500 });
+      }
     } catch (err) {
       setMessage(err.message);
     } finally {
