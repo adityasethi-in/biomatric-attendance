@@ -72,6 +72,7 @@ CLIENT_FACE_MULTI_MATCH_MIN_HITS = int(os.getenv("CLIENT_FACE_MULTI_MATCH_MIN_HI
 CLIENT_FACE_MATCH_MARGIN = float(os.getenv("CLIENT_FACE_MATCH_MARGIN", "0.035"))
 FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "server").lower()
 FACE_ENGINE_ACTIVE_WINDOWS = os.getenv("FACE_ENGINE_ACTIVE_WINDOWS", "").strip()
+SCANNER_PASSWORD_FREE_WINDOWS = os.getenv("SCANNER_PASSWORD_FREE_WINDOWS", "07:00-09:00").strip()
 FACE_ENGINE_IDLE_UNLOAD_SECONDS = int(os.getenv("FACE_ENGINE_IDLE_UNLOAD_SECONDS", "300"))
 SCANNER_OVERRIDE_MINUTES = int(os.getenv("SCANNER_OVERRIDE_MINUTES", "30"))
 LIVENESS_MODE = os.getenv("LIVENESS_MODE", "basic").lower()
@@ -242,11 +243,11 @@ def _parse_hhmm(value: str) -> dt_time | None:
         return None
 
 
-def _face_engine_windows() -> list[tuple[dt_time, dt_time]]:
-    if not FACE_ENGINE_ACTIVE_WINDOWS:
+def _parse_time_windows(raw_windows: str) -> list[tuple[dt_time, dt_time]]:
+    if not raw_windows:
         return []
     windows = []
-    for raw_window in re.split(r"[,;]", FACE_ENGINE_ACTIVE_WINDOWS):
+    for raw_window in re.split(r"[,;]", raw_windows):
         if "-" not in raw_window:
             continue
         start_raw, end_raw = raw_window.split("-", 1)
@@ -257,10 +258,18 @@ def _face_engine_windows() -> list[tuple[dt_time, dt_time]]:
     return windows
 
 
-def _time_in_window(current: dt_time, start: dt_time, end: dt_time) -> bool:
+def _face_engine_windows() -> list[tuple[dt_time, dt_time]]:
+    return _parse_time_windows(FACE_ENGINE_ACTIVE_WINDOWS)
+
+
+def _scanner_password_free_windows() -> list[tuple[dt_time, dt_time]]:
+    return _parse_time_windows(SCANNER_PASSWORD_FREE_WINDOWS)
+
+
+def _time_in_window(current: dt_time, start: dt_time, end: dt_time, *, include_end: bool = True) -> bool:
     if start <= end:
-        return start <= current <= end
-    return current >= start or current <= end
+        return start <= current <= end if include_end else start <= current < end
+    return current >= start or (current <= end if include_end else current < end)
 
 
 def face_engine_in_schedule() -> bool:
@@ -269,6 +278,14 @@ def face_engine_in_schedule() -> bool:
         return True
     current = datetime.now(_app_zone()).time()
     return any(_time_in_window(current, start, end) for start, end in windows)
+
+
+def scanner_password_free_now(current: dt_time | None = None) -> bool:
+    windows = _scanner_password_free_windows()
+    if not windows:
+        return False
+    current = current or datetime.now(_app_zone()).time()
+    return any(_time_in_window(current, start, end, include_end=False) for start, end in windows)
 
 
 def _format_human_time(value: dt_time) -> str:
@@ -286,6 +303,20 @@ def face_engine_schedule_human() -> str:
     windows = _face_engine_windows()
     if not windows:
         return "all day"
+    return ", ".join(f"{_format_human_time(start)} to {_format_human_time(end)}" for start, end in windows)
+
+
+def scanner_password_free_schedule_label() -> str:
+    windows = _scanner_password_free_windows()
+    if not windows:
+        return "disabled"
+    return ", ".join(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}" for start, end in windows)
+
+
+def scanner_password_free_schedule_human() -> str:
+    windows = _scanner_password_free_windows()
+    if not windows:
+        return "disabled"
     return ", ".join(f"{_format_human_time(start)} to {_format_human_time(end)}" for start, end in windows)
 
 
@@ -735,7 +766,21 @@ async def require_operator(
     username = x_user_username or x_admin_username
     token = x_user_token or x_admin_token
     if not username or not token:
-        raise HTTPException(status_code=401, detail="Attendance login required")
+        if not scanner_password_free_now():
+            raise HTTPException(status_code=401, detail="Attendance login required")
+        async with SessionLocal() as db:
+            org = await get_organization_by_slug(db, slug)
+            if not org or org["status"] != "active":
+                raise HTTPException(status_code=401, detail="Attendance login required")
+            operator = dict(org)
+            operator.update(
+                {
+                    "organization_id": org["id"],
+                    "organization_name": org["name"],
+                    "password_free": True,
+                }
+            )
+            return operator
 
     async with SessionLocal() as db:
         row = await _resolve_admin_row(db, slug, username)
@@ -771,6 +816,14 @@ async def warmup_scanner(request: Request, operator: dict = Depends(require_oper
         "scanner": "ready",
         "schedule": face_engine_schedule_label(),
         "schedule_human": face_engine_schedule_human(),
+        "password_free": bool(operator.get("password_free")),
+        "password_free_schedule": scanner_password_free_schedule_label(),
+        "password_free_schedule_human": scanner_password_free_schedule_human(),
+        "organization": {
+            "id": operator["organization_id"],
+            "name": operator["organization_name"],
+            "slug": operator["slug"],
+        },
         "override_until": str(operator.get("scanner_override_until") or ""),
     }
 

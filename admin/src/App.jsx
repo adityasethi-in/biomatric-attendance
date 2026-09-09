@@ -46,6 +46,7 @@ const SCAN_SUCCESS_PAUSE_MS = 1800;
 const DEFAULT_ORG_SLUG = "delight-model-school";
 const DEFAULT_ADMIN_EMAIL = "admin@delightmodelschool.in";
 const SCANNER_CLOSED_TEXT = "Scanner is available 7:00 AM to 11:00 AM. Admin can unlock for 30 minutes.";
+const PASSWORD_FREE_SCANNER_TEXT = "No password required from 7:00 AM to 9:00 AM.";
 const INDIAN_VOICE_KEYWORDS = [
   "india",
   "indian",
@@ -98,6 +99,7 @@ export default function App() {
   const [scannerAuthenticated, setScannerAuthenticated] = useState(
     sessionStorage.getItem("scanner_auth") === "true" && Boolean(sessionStorage.getItem("scanner_token"))
   );
+  const [scannerPasswordFree, setScannerPasswordFree] = useState(false);
   const [organizations, setOrganizations] = useState([]);
   const [selectedOrgSlug, setSelectedOrgSlug] = useState(
     sessionStorage.getItem("scanner_org_slug") || sessionStorage.getItem("admin_org_slug") || getActiveOrgSlug()
@@ -480,8 +482,13 @@ export default function App() {
       if (err.status === 401) {
         clearScannerSession();
         setScannerAuthenticated(false);
+        setScannerPasswordFree(false);
         closeCamera();
-        setMessage("Scanner login expired. Please login again.");
+        setMessage(
+          scannerPasswordFree
+            ? "Password-free scanning ended at 9:00 AM. Please login to continue."
+            : "Scanner login expired. Please login again."
+        );
         return;
       }
       if (err.status === 503) {
@@ -805,6 +812,7 @@ export default function App() {
         return;
       }
       setScannerOverrideNeeded(false);
+      setScannerPasswordFree(false);
       setScannerOverridePassword("");
       setScannerPassword("");
       setScannerAuthenticated(true);
@@ -870,6 +878,7 @@ export default function App() {
   function logoutScanner() {
     clearScannerSession();
     setScannerAuthenticated(false);
+    setScannerPasswordFree(false);
     setScannerOverrideNeeded(false);
     setScannerOverridePassword("");
     closeCamera();
@@ -915,6 +924,35 @@ export default function App() {
     if (cameraOpen || openingCamera) return;
     openCamera();
   }, [portal, scannerAuthenticated]);
+
+  useEffect(() => {
+    if (portal !== "attendance" || scannerAuthenticated || !selectedOrgSlug) return undefined;
+    let cancelled = false;
+
+    async function startPasswordFreeScanner() {
+      try {
+        const result = await warmupScanner();
+        if (cancelled || !result.password_free) return;
+        setScannerOrgName(result.organization?.name || "Delight Model School");
+        setScannerPasswordFree(true);
+        setScannerOverrideNeeded(false);
+        setScannerAuthenticated(true);
+        setScannerStatus("Password-free scanning active until 9:00 AM.");
+        setMessage("");
+      } catch (err) {
+        if (!cancelled && err.status !== 401 && err.status !== 503) {
+          setMessage(err.message);
+        }
+      }
+    }
+
+    startPasswordFreeScanner();
+    const intervalId = window.setInterval(startPasswordFreeScanner, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [portal, scannerAuthenticated, selectedOrgSlug]);
 
   useEffect(() => {
     if (!scannerAuthenticated) return;
@@ -1518,10 +1556,12 @@ export default function App() {
         <span>
           {scannerAuthenticated
             ? `${scannerOrgName} attendance marks automatically`
-            : "Login first, then scanner will start"}
+            : `Login first, then scanner will start. ${PASSWORD_FREE_SCANNER_TEXT}`}
         </span>
         {scannerAuthenticated && (
-          <small className="scanner-note inline">Scanner ready</small>
+          <small className="scanner-note inline">
+            {scannerPasswordFree ? "Password-free until 9:00 AM" : "Scanner ready"}
+          </small>
         )}
       </div>
 
@@ -1578,7 +1618,9 @@ export default function App() {
           <button disabled={openingCamera} onClick={() => openCamera()}>
             {openingCamera ? "Opening Camera..." : "Start Camera"}
           </button>
-          <button className="ghost-button full-width" onClick={logoutScanner}>Logout Scanner</button>
+          {!scannerPasswordFree && (
+            <button className="ghost-button full-width" onClick={logoutScanner}>Logout Scanner</button>
+          )}
         </>
       ) : (
         <>
