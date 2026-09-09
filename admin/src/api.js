@@ -118,11 +118,12 @@ export async function getBillingPrice() {
   return parseResponse(r, "Failed to load pricing");
 }
 
-export async function loginAdmin({ organizationSlug, username, password }) {
+export async function loginAdmin({ organizationSlug, username, password, scannerLogin = false }) {
   const form = new FormData();
   form.append("organization_slug", organizationSlug);
   form.append("username", username);
   form.append("password", password);
+  form.append("scanner_login", scannerLogin ? "true" : "false");
 
   const r = await fetch(`${API_BASE}/auth/login`, {
     method: "POST",

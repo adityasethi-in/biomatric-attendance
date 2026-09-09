@@ -784,6 +784,7 @@ export default function App() {
         organizationSlug: selectedOrgSlug,
         username: scannerUsername,
         password: scannerPassword,
+        scannerLogin: true,
       });
       setScannerSession(result);
       setScannerOrgName(result.organization.name);

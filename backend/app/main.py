@@ -741,7 +741,13 @@ async def require_operator(
         row = await _resolve_admin_row(db, slug, username)
         if not row or row["status"] != "active" or not row["is_active"]:
             raise HTTPException(status_code=401, detail="Invalid attendance login")
-        if not verify_admin_token(row["slug"], row["username"], row["password_hash"], token):
+        if not verify_admin_token(
+            row["slug"],
+            row["username"],
+            row["password_hash"],
+            token,
+            allowed_purposes={"admin", "scanner_morning", "scanner_after_cutoff"},
+        ):
             raise HTTPException(status_code=401, detail="Invalid attendance login")
         return dict(row)
 
@@ -820,7 +826,12 @@ async def scanner_override(
         "override_until": override_until.isoformat(),
         "schedule": face_engine_schedule_label(),
         "schedule_human": face_engine_schedule_human(),
-        "token": admin_token(row["slug"], row["username"], password_hash),
+        "token": admin_token(
+            row["slug"],
+            row["username"],
+            password_hash,
+            purpose="scanner_after_cutoff",
+        ),
         "organization": {
             "id": row["organization_id"],
             "name": row["organization_name"],
@@ -980,6 +991,7 @@ async def admin_login(
     organization_slug: str = Form(...),
     username: str = Form(...),
     password: str = Form(...),
+    scanner_login: bool = Form(False),
 ):
     async with SessionLocal() as db:
         result = await db.execute(
@@ -1020,7 +1032,21 @@ async def admin_login(
         else:
             password_hash_for_token = row["password_hash"]
 
-    token = admin_token(row["slug"], row["username"], password_hash_for_token)
+    now_ist = datetime.now(ZoneInfo(APP_TIMEZONE))
+    cutoff = now_ist.replace(hour=8, minute=25, second=0, microsecond=0)
+    token_purpose = (
+        "scanner_after_cutoff"
+        if scanner_login and now_ist > cutoff
+        else "scanner_morning"
+        if scanner_login
+        else "admin"
+    )
+    token = admin_token(
+        row["slug"],
+        row["username"],
+        password_hash_for_token,
+        purpose=token_purpose,
+    )
     return {
         "authenticated": True,
         "organization": {
@@ -1037,6 +1063,7 @@ async def admin_login(
             "full_name": row["full_name"],
         },
         "token": token,
+        "scanner_reauth_after": cutoff.isoformat() if token_purpose == "scanner_morning" else None,
     }
 
 

@@ -7,6 +7,8 @@ import hmac
 import os
 import secrets
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from passlib.context import CryptContext
 
@@ -51,26 +53,64 @@ def _sign(payload: str) -> str:
     ).hexdigest()
 
 
-def admin_token(org_slug: str, username: str, password_hash: str) -> str:
+SCANNER_REAUTH_CUTOFF = (8, 25)
+
+
+def admin_token(
+    org_slug: str,
+    username: str,
+    password_hash: str,
+    *,
+    purpose: str = "admin",
+) -> str:
+    """Create an expiring token bound to the current password hash."""
+    if purpose not in {"admin", "scanner_morning", "scanner_after_cutoff"}:
+        raise ValueError("Unsupported token purpose")
     issued_at = int(time.time())
-    payload = f"{org_slug}:{username}:{password_hash}:{issued_at}"
-    return f"{issued_at}:{_sign(payload)}"
+    payload = f"v2:{purpose}:{org_slug}:{username}:{password_hash}:{issued_at}"
+    return f"v2:{purpose}:{issued_at}:{_sign(payload)}"
 
 
-def verify_admin_token(org_slug: str, username: str, password_hash: str, token: str) -> bool:
+def _token_max_age(purpose: str, issued_at: int) -> int:
+    if purpose == "scanner_morning":
+        issued_local = datetime.fromtimestamp(issued_at, ZoneInfo("Asia/Kolkata"))
+        cutoff = issued_local.replace(
+            hour=SCANNER_REAUTH_CUTOFF[0],
+            minute=SCANNER_REAUTH_CUTOFF[1],
+            second=0,
+            microsecond=0,
+        )
+        return max(0, int(cutoff.timestamp()) - issued_at)
+
     try:
-        issued_raw, signature = token.split(":", 1)
+        return int(os.getenv("ADMIN_TOKEN_MAX_AGE_SECONDS", "28800"))
+    except ValueError:
+        return 28800
+
+
+def verify_admin_token(
+    org_slug: str,
+    username: str,
+    password_hash: str,
+    token: str,
+    *,
+    allowed_purposes: set[str] | None = None,
+) -> bool:
+    allowed_purposes = allowed_purposes or {"admin"}
+    try:
+        version, purpose, issued_raw, signature = token.split(":", 3)
+        if version != "v2" or purpose not in {"admin", "scanner_morning", "scanner_after_cutoff"} or purpose not in allowed_purposes:
+            return False
         issued_at = int(issued_raw)
     except (ValueError, AttributeError):
         return False
 
-    try:
-        max_age = int(os.getenv("ADMIN_TOKEN_MAX_AGE_SECONDS", "28800"))
-    except ValueError:
-        max_age = 28800
+    max_age = _token_max_age(purpose, issued_at)
     now = int(time.time())
+    if purpose == "scanner_morning" and max_age <= 0:
+        return False
     if max_age > 0 and (issued_at > now + 60 or now - issued_at > max_age):
         return False
 
-    payload = f"{org_slug}:{username}:{password_hash}:{issued_at}"
+    payload = f"v2:{purpose}:{org_slug}:{username}:{password_hash}:{issued_at}"
     return hmac.compare_digest(_sign(payload), signature)
